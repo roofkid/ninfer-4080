@@ -89,6 +89,15 @@ a registry that deliberately keeps one). `Q3G64_F16S` duplicates each source sca
 64-wide halves (weights bit-identical, +0.37 GiB, one group geometry). Default is D3; if the 100K
 profile needs the extra slack, take the G64 form.
 
+Quantified (2026-09-27, from the converted artifact): the Q3 body is 9.123 GB of code planes +
+0.380 GB of fp16 scales = 9.503 GB. G64 leaves the code planes byte-identical and doubles only the
+scale plane, so the cost is +0.380 GB = +0.354 GiB and +4.0% weight bytes; those bytes stream once
+per verify round (decode) and once per prefill pass, so decode loses roughly 3% (73.2 -> ~71 tok/s)
+and prefill roughly 3.5% (pp32768 1406 -> ~1358, pp100000 1166 -> ~1126 tok/s). Accuracy is
+unchanged either way, because duplication keeps every represented weight at its source scale and
+value; only a true per-64-code requantization would change quality (and would stop being a verbatim
+repack of the publisher's weights).
+
 ## 3. Facts established (evidence)
 
 ### 3.1 Why a 3-bit body is the only thing that fits
