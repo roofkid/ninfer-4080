@@ -1,4 +1,5 @@
 #include "ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.h"
+#include "ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_residency.h"
 
 #include "ninfer/ops/rmsnorm.h"
 
@@ -26,25 +27,29 @@ struct RouteSpec {
     Bf16GdnGatingScheduleId schedule;
 };
 
+// The 27B cooperative route endpoints are the reference device's single-launch ceilings, derived
+// from the shared sm_89 residency facts (bf16_gdn_gating_proj_residency.h). Split4 reaches the
+// same 1280-column ceiling as split8 while doing less work per launch, so it stays unreachable on
+// this target.
+constexpr std::int32_t k27Split8Last = bf16_gdn_single_launch_columns(
+    48, 5120, 8, 128, 3, kBf16GdnReferenceMultiprocessorCount);
+constexpr std::int32_t k27Split2Last = bf16_gdn_single_launch_columns(
+    48, 5120, 2, 128, 3, kBf16GdnReferenceMultiprocessorCount);
+static_assert(k27Split8Last == 1280 && k27Split2Last == 2688,
+              "the 27B catalog endpoints must equal the reference single-launch ceilings");
+
 constexpr std::array<RouteSpec, 5> k27Routes{{
     {{1, 1}, Bf16GdnGatingScheduleId::GemvPairedRows},
     {{2, 8}, Bf16GdnGatingScheduleId::SmallTSplit10},
-    // sm_89 has 128 SMs. The cuobjdump -res-usage figures on the sm_89 objects match the sm_86
-    // measurements exactly - split8 (256 threads, 65 regs) admits 2 CTAs/SM -> 256 device-wide;
-    // split4/2 (512 threads, 74 regs) admit 1 CTA/SM -> 128 - and sm_89 shares the sm_86
-    // register file, thread, and shared-memory limits per SM, so only the SM count changes.
-    // Grid is ceil(T/128)*3*SplitK, so split8 is legal to T<=1280 and split2 to T<=2688. Split4
-    // reaches the same 1280 ceiling as split8 while doing less work per launch, so it is
-    // unreachable on this target.
-    {{9, 1280}, Bf16GdnGatingScheduleId::MmaCooperativeSplit8},
-    {{1281, 2688}, Bf16GdnGatingScheduleId::MmaCooperativeSplit2},
-    {{2689, kAnyCols}, Bf16GdnGatingScheduleId::MmaUnsplit},
+    {{9, k27Split8Last}, Bf16GdnGatingScheduleId::MmaCooperativeSplit8},
+    {{k27Split8Last + 1, k27Split2Last}, Bf16GdnGatingScheduleId::MmaCooperativeSplit2},
+    {{k27Split2Last + 1, kAnyCols}, Bf16GdnGatingScheduleId::MmaUnsplit},
 }};
 
 constexpr std::array<RouteSpec, 5> k35Routes{{
-    // Same progression. Grid is ceil(T/64)*2*SplitK; the sm_89 budgets (512 CTAs for split16,
-    // 384 for split8/4/2) make the upstream perf-chosen bounds of 1024 / 2048 / 4096 legal again
-    // on this target, so they are restored unchanged.
+    // Grid is ceil(T/64)*2*SplitK. The reference-device budgets derived from the shared sm_89
+    // residency facts (512 CTAs for split16, 384 for split8/4/2) keep the upstream perf-chosen
+    // bounds of 1024 / 2048 / 4096 single-launch legal here too.
     {{1, 127}, Bf16GdnGatingScheduleId::MmaCooperativeSplit16},
     {{128, 1024}, Bf16GdnGatingScheduleId::MmaCooperativeSplit8},
     {{1025, 2048}, Bf16GdnGatingScheduleId::MmaCooperativeSplit4},
@@ -66,21 +71,6 @@ constexpr bool catalog_is_closed(const std::array<RouteSpec, N>& routes,
 static_assert(catalog_is_closed(k27Routes, kAnyCols));
 static_assert(catalog_is_closed(k35Routes, kAnyCols));
 
-// Device-wide resident-CTA budgets for the sm_89 build: the per-SM occupancy measured on sm_86
-// carries over unchanged (identical register counts and per-SM limits), scaled from 82 to the
-// RTX 4090's 128 SMs. These are the single source of truth: both the runtime residency
-// predicates and the compile-time catalog guard below read them, so a retuned constant cannot
-// silently disagree with the route table it is meant to bound.
-constexpr std::int32_t resident_ctas_27(Bf16GdnGatingScheduleId schedule) noexcept {
-    return schedule == Bf16GdnGatingScheduleId::MmaCooperativeSplit8 ? 256 : 128;
-}
-
-constexpr std::int32_t resident_ctas_35(Bf16GdnGatingScheduleId schedule) noexcept {
-    if (schedule == Bf16GdnGatingScheduleId::MmaCooperativeSplit32) { return 256; }
-    if (schedule == Bf16GdnGatingScheduleId::MmaCooperativeSplit16) { return 512; }
-    return 384;
-}
-
 // Zero marks a schedule that is not launched cooperatively and therefore carries no residency
 // constraint at all.
 constexpr std::int32_t cooperative_split_k(Bf16GdnGatingScheduleId schedule) noexcept {
@@ -100,10 +90,21 @@ constexpr std::int32_t cooperative_split_k(Bf16GdnGatingScheduleId schedule) noe
     }
 }
 
+// Device-wide resident-CTA budget of one cooperative specialization: the measured per-SM
+// occupancy (bf16_gdn_gating_proj_residency.h, shared with the launcher) times the selected
+// device's SM count. The runtime launcher and the compile-time catalog guard read the same
+// facts, so a retuned constant cannot silently disagree with the route table it bounds.
+constexpr std::int32_t resident_ctas(Bf16GdnGatingScheduleId schedule, std::int32_t heads,
+                                     std::int32_t input_rows, std::int32_t sm_count) noexcept {
+    const std::int32_t split_k = cooperative_split_k(schedule);
+    if (split_k == 0) { return 0; }
+    return sm_count * bf16_gdn_resident_ctas_per_sm(heads, input_rows, split_k);
+}
+
 // A cooperative launch requires the entire grid to be simultaneously resident. A route whose upper
-// bound exceeds the budget is not merely slow: the driver rejects the launch outright with
-// cudaErrorCooperativeLaunchTooLarge on the first prefill wide enough to reach it. Checking the
-// catalog at compile time turns that class of regression into a build failure.
+// bound exceeds the reference device's budget is not merely slow: the driver rejects the launch
+// outright with cudaErrorCooperativeLaunchTooLarge on the first prefill wide enough to reach it.
+// Checking the catalog at compile time turns that class of regression into a build failure.
 template <std::size_t N, typename Budget>
 constexpr bool catalog_is_resident(const std::array<RouteSpec, N>& routes, std::int32_t tile_cols,
                                    std::int32_t row_tiles, Budget budget) noexcept {
@@ -117,10 +118,67 @@ constexpr bool catalog_is_resident(const std::array<RouteSpec, N>& routes, std::
     return true;
 }
 
-static_assert(catalog_is_resident(k27Routes, 128, 3, resident_ctas_27),
-              "a 27B cooperative route exceeds the sm_89 resident-CTA budget at its upper bound");
-static_assert(catalog_is_resident(k35Routes, 64, 2, resident_ctas_35),
-              "a 35B cooperative route exceeds the sm_89 resident-CTA budget at its upper bound");
+// On a device with fewer SMs than the reference the launcher partitions independent token tiles
+// instead of submitting one whole-route grid, so a route stays usable while one token tile
+// (`row_tiles * split_k` CTAs) fits the device-wide budget. A route that failed this would fall
+// back to the unsplit kernel, whose accumulation is not part of the registered accuracy contract.
+template <std::size_t N, typename Budget>
+constexpr bool catalog_can_partition(const std::array<RouteSpec, N>& routes,
+                                     std::int32_t row_tiles, Budget budget) noexcept {
+    for (const RouteSpec& route : routes) {
+        const std::int32_t split_k = cooperative_split_k(route.schedule);
+        if (split_k == 0) { continue; }
+        if (row_tiles * split_k > budget(route.schedule)) { return false; }
+    }
+    return true;
+}
+
+constexpr std::int32_t resident_ctas_27(Bf16GdnGatingScheduleId schedule,
+                                        std::int32_t sm_count) noexcept {
+    return resident_ctas(schedule, 48, 5120, sm_count);
+}
+
+constexpr std::int32_t resident_ctas_35(Bf16GdnGatingScheduleId schedule,
+                                        std::int32_t sm_count) noexcept {
+    return resident_ctas(schedule, 32, 2048, sm_count);
+}
+
+constexpr std::int32_t resident_ctas_27_reference(Bf16GdnGatingScheduleId schedule) noexcept {
+    return resident_ctas_27(schedule, kBf16GdnReferenceMultiprocessorCount);
+}
+
+constexpr std::int32_t resident_ctas_27_minimum(Bf16GdnGatingScheduleId schedule) noexcept {
+    return resident_ctas_27(schedule, kBf16GdnMinimumMultiprocessorCount);
+}
+
+constexpr std::int32_t resident_ctas_35_reference(Bf16GdnGatingScheduleId schedule) noexcept {
+    return resident_ctas_35(schedule, kBf16GdnReferenceMultiprocessorCount);
+}
+
+constexpr std::int32_t resident_ctas_35_minimum(Bf16GdnGatingScheduleId schedule) noexcept {
+    return resident_ctas_35(schedule, kBf16GdnMinimumMultiprocessorCount);
+}
+
+// The catalog is the reference device's performance policy: every cooperative route's largest
+// column count must fit one whole-grid launch on 128 SMs.
+static_assert(catalog_is_resident(k27Routes, 128, 3, resident_ctas_27_reference),
+              "a 27B cooperative route exceeds the 128-SM reference resident-CTA budget");
+static_assert(catalog_is_resident(k35Routes, 64, 2, resident_ctas_35_reference),
+              "a 35B cooperative route exceeds the 128-SM reference resident-CTA budget");
+
+// The same catalog must stay launchable on the smallest supported sm_89 device, where the
+// launcher partitions token tiles; this ties the route table and the per-SM facts to the 76-SM
+// floor instead of the 4090's SM count.
+static_assert(catalog_can_partition(k27Routes, 3, resident_ctas_27_minimum),
+              "a 27B cooperative route cannot seat one token tile on the minimum device");
+static_assert(catalog_can_partition(k35Routes, 2, resident_ctas_35_minimum),
+              "a 35B cooperative route cannot seat one token tile on the minimum device");
+
+// The fused 35B norm/control route runs the split-32 specialization over at most 16 columns.
+static_assert(16 <= bf16_gdn_single_launch_columns(32, 2048, 32, 64, 2,
+                                                   kBf16GdnReferenceMultiprocessorCount));
+static_assert(16 <= bf16_gdn_single_launch_columns(32, 2048, 32, 64, 2,
+                                                   kBf16GdnMinimumMultiprocessorCount));
 
 bool is_27(const Bf16GdnGatingProblem& problem) noexcept {
     return problem.heads == 48 && problem.input_rows == 5120;

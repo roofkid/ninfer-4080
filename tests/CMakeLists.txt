@@ -273,6 +273,11 @@ foreach(op IN LISTS ninfer_op_tests)
     LIBRARIES ninfer_ops)
 endforeach()
 
+
+# Pure host-side qualification of the gating projection's cooperative-launch bounds for the
+# reference 128-SM device and the 76-SM minimum supported device. No GPU is touched.
+ninfer_add_op_test(ninfer_gdn_gating_proj_residency_test
+  SOURCES ops/test_gdn_gating_proj_residency.cpp)
 ninfer_add_op_test(ninfer_linear_topk_test
   SOURCES ops/test_linear_topk.cu
   LIBRARIES ninfer_ops)

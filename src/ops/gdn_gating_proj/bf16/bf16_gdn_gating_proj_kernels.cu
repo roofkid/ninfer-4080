@@ -4,6 +4,7 @@
 #include "ops/common/memory.cuh"
 #include "ops/common/warp.cuh"
 #include "ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_gemm_mma.cuh"
+#include "ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_residency.h"
 
 #include "core/device.h" // CUDA_CHECK
 
@@ -14,7 +15,6 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
-#include <type_traits>
 
 namespace ninfer::ops::detail {
 namespace {
@@ -259,18 +259,11 @@ void require_shape35(const Weight& w, const char* name) {
 template <class Geometry, int SplitK>
 constexpr std::int32_t cooperative_resident_ctas_per_sm() noexcept {
     static_assert(SplitK > 1);
-    if constexpr (std::is_same_v<Geometry, Bf16Gdn27Geometry>) {
-        static_assert(SplitK == 8 || SplitK == 4 || SplitK == 2);
-        // Qualified on the sm_120a build: BN128 split-8 uses 256 threads and split-4/2 use
-        // 512 threads; registers and 40-KiB shared memory admit two resident CTAs per SM.
-        return 2;
-    } else {
-        static_assert(std::is_same_v<Geometry, Bf16Gdn35Geometry>);
-        static_assert(SplitK == 32 || SplitK == 16 || SplitK == 8 || SplitK == 4 || SplitK == 2);
-        // BN64 split-32 is register-limited to two resident CTAs per SM. The remaining
-        // specializations admit four. These are kernel facts, not a device-wide SM-count policy.
-        return SplitK == 32 ? 2 : 4;
-    }
+    constexpr std::int32_t per_sm =
+        bf16_gdn_resident_ctas_per_sm(Geometry::kHeads, Geometry::kHidden, SplitK);
+    static_assert(per_sm > 0,
+                  "cooperative specialization is missing from the sm_89 residency table");
+    return per_sm;
 }
 
 template <class Geometry, int SplitK, int Warps = kBf16GdnWarps, bool NormalizeInput = false,
