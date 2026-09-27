@@ -1,0 +1,141 @@
+# syntax=docker/dockerfile:1
+#
+# NInfer-4080 agent work image.
+#
+# This is NOT the product image (see ./Dockerfile). It is the development and
+# measurement environment for the RTX 4080 bring-up and the 3-bit GSQ artifact
+# work described in docs/maintainer/rtx-4080-plan.md. It carries:
+#
+#   - the engine toolchain: CUDA 13.1 devel (nvcc, sm_89), GCC 13, CMake, Ninja,
+#     ccache, FFmpeg/curl dev libraries, the repo's Python test requirements;
+#   - Python 3.11 (uv-managed) with CPU/GPU torch, safetensors, huggingface_hub,
+#     pytest, so the artifact/converter suites and the HF downloads run here;
+#   - the pi coding agent, ketch, ripgrep, fd, jq;
+#   - the RTX 4080 itself is passed in from the host with `--gpus all`.
+#
+# It intentionally does NOT COPY the repository: bind-mount it so edits and build
+# outputs stay on the host:
+#
+#   docker build -f Dockerfile.dev -t ninfer-4080-dev:pi .
+#
+#   docker run --rm -it --gpus all \
+#     --add-host=host.docker.internal:host-gateway \
+#     -v "$PWD:/work" -v "$HOME/ninfer-models:/models" \
+#     ninfer-4080-dev:pi
+#
+# A shell instead of pi:  docker run --rm -it --gpus all --entrypoint bash ...
+#
+# The CUDA forward-compatibility libraries are removed for the same reason the
+# product image removes them: they are datacenter-only, and on any GeForce card
+# (the RTX 4080 included) the loader would pick them up and every CUDA call would
+# fail with cudaErrorCompatNotSupportedOnDevice.
+
+FROM nvidia/cuda:13.1.2-devel-ubuntu24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG NODE_MAJOR=22
+ARG KETCH_VERSION=0.17.0
+
+# Engine build/runtime dependencies (mirrors ./Dockerfile) plus the development
+# tooling the plan's stages need: ccache for the repeated CUDA builds, rg/fd/jq for
+# navigation, clang-format for the repo's .clang-format, git-lfs for checkpoints.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        build-essential \
+        gcc-13 \
+        g++-13 \
+        cmake \
+        ninja-build \
+        pkg-config \
+        ccache \
+        ca-certificates \
+        curl \
+        wget \
+        unzip \
+        xz-utils \
+        git \
+        git-lfs \
+        openssh-client \
+        jq \
+        less \
+        tree \
+        procps \
+        psmisc \
+        ripgrep \
+        fd-find \
+        clang-format \
+        libavcodec-dev \
+        libavformat-dev \
+        libavutil-dev \
+        libswscale-dev \
+        libcurl4-openssl-dev \
+    && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Datacenter-only forward-compatibility libraries, as in ./Dockerfile.
+RUN rm -rf /usr/local/cuda-13.1/compat /usr/local/cuda-13/compat /usr/local/cuda/compat
+
+# Optional profiling tools. The CUDA devel image usually already ships
+# nsight-compute under /opt/nvidia; the apt packages are the fallback. A missing
+# profiler must not fail the image build.
+RUN apt-get update \
+    && ( apt-get install --yes --no-install-recommends nsight-compute nsight-systems \
+         || echo "WARNING: nsight packages unavailable here; profiling stays optional" ) \
+    && rm -rf /var/lib/apt/lists/*
+
+# pi + ketch, as in the previous sandbox image.
+RUN curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
+    && apt-get install --yes --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g @earendil-works/pi-coding-agent
+
+RUN curl -fsSL "https://github.com/1broseidon/ketch/releases/download/v${KETCH_VERSION}/ketch_${KETCH_VERSION}_linux_x86_64.tar.gz" \
+      | tar -xz -C /usr/local/bin/ \
+    && test -x /usr/local/bin/ketch
+
+# Python 3.11 via uv. AGENTS.md pins Python 3.11 for the project tools; Ubuntu
+# 24.04 ships 3.12, so the interpreter comes from uv rather than apt. torch is the
+# CUDA wheel: the converter's default `--device cuda` path needs it, and it is
+# reachable on the host GPU through --gpus all.
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
+RUN curl -fsSL https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
+    && uv python install 3.11 \
+    && uv venv --python 3.11 /opt/venv \
+    && uv pip install --python /opt/venv/bin/python \
+        torch \
+        numpy \
+        safetensors \
+        "huggingface_hub[cli]" \
+        pytest \
+        PyYAML \
+        rich \
+        tqdm \
+    && rm -rf /root/.cache/uv
+
+# Toolchain selection: exactly the shape docs/rtx-3090-linux.md prescribes, with
+# sm_89 pinned because CMakeLists.txt rejects anything else.
+ENV PATH=/opt/venv/bin:/usr/local/cuda/bin:$PATH \
+    CUDA_HOME=/usr/local/cuda \
+    CUDACXX=/usr/local/cuda/bin/nvcc \
+    CC=/usr/bin/gcc-13 \
+    CXX=/usr/bin/g++-13 \
+    CUDAHOSTCXX=/usr/bin/g++-13 \
+    CMAKE_CUDA_ARCHITECTURES=89 \
+    CCACHE_DIR=/root/.cache/ccache \
+    CCACHE_MAXSIZE=20G \
+    NINFER_MODEL_DIR=/models \
+    HF_HOME=/models/.hf
+
+# Fail the build, not the session, when a tool is missing or torch is CPU-only.
+RUN set -eux; \
+    nvcc --version | tail -n 2; \
+    gcc-13 --version | head -n 1; \
+    cmake --version | head -n 1; \
+    ninja --version; \
+    ccache --version | head -n 1; \
+    /opt/venv/bin/python -c "import torch; assert torch.version.cuda, 'CPU-only torch wheel'; import numpy, safetensors, huggingface_hub; print('torch', torch.__version__, 'cuda', torch.version.cuda)"; \
+    node --version; \
+    for tool in pi ketch rg fd jq hf pytest git-lfs; do command -v "$tool"; done
+
+WORKDIR /work
+ENTRYPOINT ["pi"]
