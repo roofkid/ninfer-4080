@@ -1,5 +1,7 @@
 #include "ops/linear/q3/q3_rowsplit_gemv.cuh"
 
+#include "ops/linear/q3/q3_rowsplit_gemv_staged.cuh"
+
 #include "core/device.h"
 #include "ops/linear/q3/q3_launch.h"
 
@@ -40,6 +42,39 @@ void launch_schedule(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t
 
 void launch_q3_gemv_r8_c8(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
     launch_schedule<8>(x, w, out, stream);
+}
+
+// Staged small-T schedule: a cp.async pipeline over shared-memory code windows, one weight row
+// per warp, a whole 128-code window decoded per lane per iteration.
+void launch_q3_gemv_r8_c8_staged(const Tensor& x, const Weight& w, Tensor& out,
+                                  cudaStream_t stream) {
+    const std::int32_t rows     = out.ne[0];
+    const std::int32_t k        = x.ne[0];
+    const std::int32_t cols     = x.ne[1];
+    const std::int32_t padded_k = static_cast<std::int32_t>(w.padded_shape[1]);
+    const dim3 grid(static_cast<unsigned>(div_up(rows, q3_gemv_staged::kWarpsPerCta)), 1u, 1u);
+    constexpr int kMinBlocks = 6;
+
+    if (k == padded_k) {
+        q3_gemv_staged::q3_gemv_staged_kernel<8, true, false,
+                                               q3_gemv_staged::kProductionGroupsPerStage,
+                                               q3_gemv_staged::kProductionPipelineStages,
+                                               kMinBlocks>
+            <<<grid, q3_gemv_staged::kThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
+            static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(out.data),
+            rows, k, cols, padded_k, 1, rows);
+    } else {
+        q3_gemv_staged::q3_gemv_staged_kernel<8, false, false,
+                                               q3_gemv_staged::kProductionGroupsPerStage,
+                                               q3_gemv_staged::kProductionPipelineStages,
+                                               kMinBlocks>
+            <<<grid, q3_gemv_staged::kThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
+            static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(out.data),
+            rows, k, cols, padded_k, 1, rows);
+    }
+    CUDA_CHECK(cudaGetLastError());
 }
 
 } // namespace ninfer::ops::detail

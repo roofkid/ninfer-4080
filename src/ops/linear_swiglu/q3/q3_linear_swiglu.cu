@@ -3,7 +3,7 @@
 #include "core/device.h"
 #include "ops/common/math.cuh"
 #include "ops/linear/q3/q3_launch.h"
-#include "ops/linear/q3/q3_rowsplit_storage.cuh"
+#include "ops/linear/q3/q3_rowsplit_gemv_staged.cuh"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -37,127 +37,10 @@ __global__ void q3_swiglu_epilogue_kernel(const float* __restrict__ proj,
     }
 }
 
-// Fused decode route for the MTP width: one warp computes output row `row` from gate row `row`
-// and up row `row + rows` of the [2*rows, K] parent. The K loop mirrors the qualified
-// q3_rowsplit_gemv_kernel: two consecutive 128-code groups per iteration, the low half-warp on
-// the even group and the high half-warp on the odd group, so every code byte is fetched once.
-// Both rows reuse the activation reads and only lane 0 rounds silu(gate)*up to BF16, so decode
-// never materializes the FP32 projection plane.
-template <int MaxCols>
-__global__ __launch_bounds__(256, 2) void q3_rowsplit_gemv_swiglu_kernel(
-    const __nv_bfloat16* __restrict__ x,
-    const std::uint8_t* __restrict__ codes,
-    const std::uint8_t* __restrict__ scales,
-    __nv_bfloat16* __restrict__ out,
-    std::int32_t rows,
-    std::int32_t k,
-    std::int32_t cols,
-    std::int32_t padded_k) {
-    static_assert(MaxCols >= 1 && MaxCols <= 8);
-    constexpr int kWarps      = 8;
-    constexpr int kGroupSize  = Q3RowSplitStorage::kGroupK;
-    constexpr int kGroupBytes = Q3RowSplitStorage::kCodeBytesPerGroup;
+// The fused decode route is the staged Q3 GEMV with the gate/up problem: one warp owns one
+// output row together with its matching up row (`linear/q3/q3_rowsplit_gemv_staged.cuh`). It
+// never materializes the FP32 projection plane and rounds silu(gate) * up once.
 
-    const std::int32_t warp = static_cast<std::int32_t>(threadIdx.x) >> 5;
-    const std::int32_t lane = static_cast<std::int32_t>(threadIdx.x) & 31;
-    const std::int32_t row  = static_cast<std::int32_t>(blockIdx.x) * kWarps + warp;
-    if (row >= rows) { return; }
-
-    const std::int32_t groups_per_row = padded_k / kGroupSize;
-    const std::uint8_t* gate_codes =
-        codes + static_cast<std::int64_t>(row) * groups_per_row * kGroupBytes;
-    const std::uint8_t* up_codes =
-        gate_codes + static_cast<std::int64_t>(rows) * groups_per_row * kGroupBytes;
-    const std::uint8_t* gate_scales = scales + static_cast<std::int64_t>(row) * groups_per_row * 2;
-    const std::uint8_t* up_scales =
-        gate_scales + static_cast<std::int64_t>(rows) * groups_per_row * 2;
-
-    const std::int32_t group_lane = lane >> 4;
-    const std::int32_t local      = lane & 15;
-    const std::int32_t byte0      = 3 * local;
-    const std::int32_t code_base  = 8 * local;
-
-    float gate_accum[MaxCols];
-    float up_accum[MaxCols];
-#pragma unroll
-    for (int c = 0; c < MaxCols; ++c) {
-        gate_accum[c] = 0.0F;
-        up_accum[c]   = 0.0F;
-    }
-
-    for (std::int32_t group = 0; group < groups_per_row; group += 2) {
-        const std::int32_t active_group = group + group_lane;
-        float gate_weights[8];
-        float up_weights[8];
-        std::int32_t kbase = 0;
-        if (active_group < groups_per_row) {
-            const std::uint8_t* gate_ptr = gate_codes + active_group * kGroupBytes;
-            const std::uint8_t* up_ptr   = up_codes + active_group * kGroupBytes;
-            const std::uint32_t gate_window =
-                static_cast<std::uint32_t>(gate_ptr[byte0]) |
-                (static_cast<std::uint32_t>(gate_ptr[byte0 + 1]) << 8) |
-                (static_cast<std::uint32_t>(gate_ptr[byte0 + 2]) << 16);
-            const std::uint32_t up_window =
-                static_cast<std::uint32_t>(up_ptr[byte0]) |
-                (static_cast<std::uint32_t>(up_ptr[byte0 + 1]) << 8) |
-                (static_cast<std::uint32_t>(up_ptr[byte0 + 2]) << 16);
-            const float gate_scale = __half2float(__ushort_as_half(
-                *reinterpret_cast<const std::uint16_t*>(gate_scales + active_group * 2)));
-            const float up_scale = __half2float(__ushort_as_half(
-                *reinterpret_cast<const std::uint16_t*>(up_scales + active_group * 2)));
-#pragma unroll
-            for (int c = 0; c < 8; ++c) {
-                gate_weights[c] =
-                    static_cast<float>(q3_signed_code((gate_window >> (3 * c)) & 0x7u)) * gate_scale;
-                up_weights[c] =
-                    static_cast<float>(q3_signed_code((up_window >> (3 * c)) & 0x7u)) * up_scale;
-            }
-            kbase = active_group * kGroupSize + code_base;
-        } else {
-#pragma unroll
-            for (int c = 0; c < 8; ++c) {
-                gate_weights[c] = 0.0F;
-                up_weights[c]   = 0.0F;
-            }
-        }
-#pragma unroll
-        for (int col = 0; col < MaxCols; ++col) {
-            if (col >= cols) { continue; }
-            const uint4 packed =
-                *reinterpret_cast<const uint4*>(x + static_cast<std::int64_t>(col) * k + kbase);
-            const __nv_bfloat162 p0 = *reinterpret_cast<const __nv_bfloat162*>(&packed.x);
-            const __nv_bfloat162 p1 = *reinterpret_cast<const __nv_bfloat162*>(&packed.y);
-            const __nv_bfloat162 p2 = *reinterpret_cast<const __nv_bfloat162*>(&packed.z);
-            const __nv_bfloat162 p3 = *reinterpret_cast<const __nv_bfloat162*>(&packed.w);
-            const float2 f0 = __bfloat1622float2(p0);
-            const float2 f1 = __bfloat1622float2(p1);
-            const float2 f2 = __bfloat1622float2(p2);
-            const float2 f3 = __bfloat1622float2(p3);
-            gate_accum[col] +=
-                gate_weights[0] * f0.x + gate_weights[1] * f0.y + gate_weights[2] * f1.x +
-                gate_weights[3] * f1.y + gate_weights[4] * f2.x + gate_weights[5] * f2.y +
-                gate_weights[6] * f3.x + gate_weights[7] * f3.y;
-            up_accum[col] += up_weights[0] * f0.x + up_weights[1] * f0.y + up_weights[2] * f1.x +
-                             up_weights[3] * f1.y + up_weights[4] * f2.x + up_weights[5] * f2.y +
-                             up_weights[6] * f3.x + up_weights[7] * f3.y;
-        }
-    }
-
-#pragma unroll
-    for (int col = 0; col < MaxCols; ++col) {
-        float gate = gate_accum[col];
-        float up   = up_accum[col];
-#pragma unroll
-        for (int offset = 16; offset > 0; offset >>= 1) {
-            gate += __shfl_down_sync(0xffffffffu, gate, offset);
-            up += __shfl_down_sync(0xffffffffu, up, offset);
-        }
-        if (lane == 0 && col < cols) {
-            out[static_cast<std::int64_t>(col) * rows + row] =
-                __float2bfloat16_rn(silu(gate) * up);
-        }
-    }
-}
 
 } // namespace
 
@@ -183,11 +66,19 @@ void q3_linear_swiglu_dispatch(const Tensor& x, const Weight& w, Tensor& out, Wo
         throw std::invalid_argument("q3 linear_swiglu: invalid token extent");
     }
     if (columns <= kGemvColumns) {
-        const dim3 grid(static_cast<unsigned>((kOutputRows + 7) / 8), 1u, 1u);
-        q3_rowsplit_gemv_swiglu_kernel<8><<<grid, 8 * 32, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
-            static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(out.data),
-            kOutputRows, x.ne[0], columns, static_cast<std::int32_t>(w.padded_shape[1]));
+        const dim3 grid(
+            static_cast<unsigned>((kOutputRows + q3_gemv_staged::kWarpsPerCta - 1) /
+                                   q3_gemv_staged::kWarpsPerCta),
+            1u, 1u);
+        q3_gemv_staged::q3_gemv_staged_kernel<8, true, true,
+                                              q3_gemv_staged::kProductionGroupsPerStage,
+                                              q3_gemv_staged::kProductionPipelineStages, 3>
+            <<<grid, q3_gemv_staged::kThreads, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(x.data),
+                static_cast<const std::uint8_t*>(w.qdata),
+                static_cast<const std::uint8_t*>(w.scales),
+                static_cast<__nv_bfloat16*>(out.data), kOutputRows, x.ne[0], columns,
+                static_cast<std::int32_t>(w.padded_shape[1]), kOutputRows, kGateUpRows);
         CUDA_CHECK(cudaGetLastError());
         return;
     }

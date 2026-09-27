@@ -9,7 +9,7 @@ Q3Launch select_q3_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
     // Decode and MTP widths use the warp-per-row GEMV; prefill uses the pipelined tall engine and
     // its 64-token tile through T=127; the staged 32x64 tile serves the narrow remainder and the
     // shapes the tall engine does not own.
-    if (t <= 8) { return launch_q3_gemv_r8_c8; }
+    if (t <= 8) { return launch_q3_gemv_r8_c8_staged; }
     if (n % 128 == 0 && t >= 64) {
         return t >= 128 ? launch_q3_mma_tall_r128_c128 : launch_q3_mma_tall_r128_c64;
     }
