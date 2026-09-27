@@ -86,8 +86,10 @@ Complete when, on the 4080:
 **Stage 2 decision point (D3):** the weights are identical either way; only the storage geometry
 differs. `Q3G128_F16S` keeps the source groups (tightest, 3.125 bpw, but a second group geometry in
 a registry that deliberately keeps one). `Q3G64_F16S` duplicates each source scale into its two
-64-wide halves (weights bit-identical, +0.37 GiB, one group geometry). Default is D3; if the 100K
-profile needs the extra slack, take the G64 form.
+64-wide halves (weights bit-identical, +0.35 GiB, one group geometry).
+**Decision (2026-09-27, maintainer): G128 stays.** The G64 duplication buys no accuracy (identical
+represented weights) and costs both VRAM and stream bytes, so the single-geometry convenience does
+not pay; revisit only if that registry rule becomes a binding constraint.
 
 Quantified (2026-09-27, from the converted artifact): the Q3 body is 9.123 GB of code planes +
 0.380 GB of fp16 scales = 9.503 GB. G64 leaves the code planes byte-identical and doubles only the
