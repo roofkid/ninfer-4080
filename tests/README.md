@@ -90,10 +90,23 @@ Linear tests are independently runnable by weight and activation-compute profile
 
 ```bash
 cmake --build build --parallel --target \
-  ninfer_linear_q4_a16_test ninfer_linear_q5_a16_test \
+  ninfer_linear_q3_a16_test ninfer_linear_q4_a16_test ninfer_linear_q5_a16_test \
   ninfer_linear_q6_a16_test ninfer_linear_w8_a16_test
-ctest --test-dir build -R '^ninfer_linear_(q4|q5|q6|w8)_a16_test$' --output-on-failure
+ctest --test-dir build -R '^ninfer_linear_(q3|q4|q5|q6|w8)_a16_test$' --output-on-failure
 ```
+
+`ninfer_linear_q3_a16_tall_test` byte-compares the pipelined tall Q3 prefill route against the
+staged 32x64 route at T = 9..513 step 8, on a wide body shape, and on a padded-K shape; it has
+no oracle column of its own by design.
+
+The fused projection suites carry the registered Q3 profile alongside their original profiles:
+`ninfer_linear_swiglu_q3_a16_test` and `ninfer_linear_add_q3_a16_test` are separate binaries, and
+`ninfer_attn_input_proj_test`, `ninfer_gdn_input_proj_test`,
+`ninfer_gdn_input_proj_conv_snapshot_test`, and `ninfer_gdn_input_proj_conv_record_test` run Q3
+cases inside their existing oracles. `ninfer_linear_swiglu_q3_a16_test` exercises the folded tall
+SwiGLU route at 64+ tokens and the FP32-accumulator chunked epilogue below that; the two-parent
+Q3 attention and GDN projections use the
+single-projection composition with column-wise row copies.
 
 All Linear files use `ops/linear/linear_test_common.{h,cpp}` and the same
 `ops/quantized_weight.h` fixture as the fused projection tests. The fixture produces the complete
@@ -184,6 +197,17 @@ python3 tools/smoke/serve_thinking_preservation.py \
 
 The shared messages are in
 [`fixtures/serve/qwen3_6_thinking_preservation.json`](fixtures/serve/qwen3_6_thinking_preservation.json).
+
+The long-context retrieval and vision smoke also runs against an already-started server with the
+real artifact (Qwen3.8-27B class; it plants a single passphrase, five site codes, and an exact
+code block in a ~98K-token document, asks one question per gate, and cross-checks `/metrics`
+against the request timings):
+
+```bash
+python3 -m tools.smoke.serve_retrieval \
+  --base-url http://127.0.0.1:8080 --model qwen3.8-27b \
+  --output /tmp/retrieval.json
+```
 
 ## What belongs here
 
