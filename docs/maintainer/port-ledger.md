@@ -17,6 +17,45 @@ Maintenance rules:
 - When a feature is deliberately not ported, record the decision here instead
   of leaving a silent gap.
 
+## Live plan: RTX 4080 bring-up and the 3-bit GSQ artifact (2026-09-26)
+
+The maintainer is bringing this fork up on an RTX 4080 (16 GB, `sm_89`, 76 SMs) with a new 3-bit
+`Q3*_F16S` weight scheme repacked verbatim from
+`ISTA-DASLab/Qwen3.8-27B-3Bit-GSQ` @ `b5ce0b76`. Decisions, evidence, stages, gates, and the
+resume checklist live in [rtx-4080-plan.md](rtx-4080-plan.md), which is the live plan and is
+deleted when the work finishes. Three items belong in this ledger:
+
+- **Registry amendment authorised 2026-09-26.** `tensor-formats.md` section 10 excludes Q2/Q3 code
+  widths and alternate group sizes. No registered recipe fits a 16 GB card: the Q4 floor is
+  13.89 GiB of weights against roughly 15.7 GiB usable, before any KV. The Q3 exclusion is lifted
+  for one registered scheme; the admission evidence is in the plan.
+- **4080 platform gap (open, blocks every 16 GB Ada device).**
+  `src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.cpp:71` derives device-wide
+  cooperative-launch budgets from the RTX 4090's 128 SMs; at 76 SMs the budget is overstated and
+  the driver rejects the launch with `cudaErrorCooperativeLaunchTooLarge`. The fix sources the
+  budgets from `DeviceContext::multiprocessor_count()` and re-derives the route bounds for the
+  minimum supported SM count. This is the sm_89 form of the open `Don-Chad 7afc8e17` and UDP
+  `45a5ae57` rows above.
+- **Deliberate non-port to the 5090 tree:** the 3-bit scheme exists to fit a 16 GB card. The 5090
+  tree fits the registered formats at its full context, so the port target is the 4090/4080 tree
+  only.
+- **Q3 tall A16 GEMM (plan 5c.1, landed in the working tree 2026-09-27; uncommitted).** Adapted
+  from `JGamboa/ninfer-4090-windows` `4ba151c` ("pipeline the Q4/Q5 prefill GEMMs with one CTA per
+  SM") to the Q3G128_F16S planes: `src/ops/linear/q3/q3_rowsplit_tall_mma.{cuh,cu}` and the folded
+  gate/up SwiGLU problem there, dispatch in `q3_dispatch.cpp` / `q3_linear_swiglu.cu`, and the
+  byte-compare test `tests/ops/linear/test_q3_a16_tall.cpp`. Byte-identical to the staged 32x64
+  route at T = 9..513; `pp32768` 1014.98 -> 1406.34 tok/s and `pp100000` 871.02 -> 1166.48 tok/s
+  (full `ctest` clean), so D10's prefill axis is met and 5c.2 is now optional headroom. The
+  remaining 5c.2-5c.4 ports keep their fork commits in the plan's table.
+- **5c.3 n-gram drafts (partial port, 2026-09-27; wide verify window disabled).** Ported from
+  `375542a`, `535f9c1`, and `be3b680`: `ngram_pool.h`/`ngram_policy.h` with the policy unit test,
+  the `mtp_round` verify-width split and every engine/round-state/workspace/ReplaySSM consumer,
+  chaining in `decode_mtp_batch`, the CLI/serve flags, request-log schema 21, and the metrics
+  counters. The narrow path is lossless and the real test passes. The wide verify window is off
+  (the planner keeps `verify_window == draft_window`) because a wide round on the real artifact
+  produced a wrong correction logit at one column; the plan's Stage 5c.3 result block records
+  the isolated round and the components ruled out. Do not re-enable before that is explained.
+
 ## Feature rows
 
 | Feature | 4090 (`rtx4090-port`) | 5090 (`nuntius-serve`) | Notes |
