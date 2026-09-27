@@ -1,5 +1,6 @@
 #include "targets/qwen3_6/impl/runtime/instance.h"
 #include "targets/qwen3_6/impl/runtime/layouts.h"
+#include "targets/qwen3_6/impl/runtime/ngram_policy.h"
 #include "targets/qwen3_6/impl/runtime/vision_context.h"
 #include "targets/qwen3_6/impl/runtime/workspace_recipe.h"
 
@@ -157,7 +158,12 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
             builder, GdnReplayRecordSpec{
                          .layers          = TextConfig::gdn_layers(),
                          .record_capacity = static_cast<std::int32_t>(plan.max_concurrency),
-                         .width           = static_cast<std::int32_t>(plan.draft_window + 1U),
+                         // MTP records its widest verify round (V+1); DFlash verifies K+1.
+                         .width = static_cast<std::int32_t>(
+                             (plan.speculative_backend == SpeculativeBackend::Mtp
+                                  ? plan.verify_window
+                                  : plan.draft_window) +
+                             1U),
                          .conv_channels   = TextConfig::convolution_dim,
                          .qk_heads        = TextConfig::gdn_key_heads,
                          .value_heads     = TextConfig::gdn_value_heads,
@@ -216,6 +222,10 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                                          .output_rows    = TextConfig::output_rows,
                                          .batch_capacity = plan.max_concurrency,
                                          .draft_window   = plan.draft_window,
+                                         .verify_window  = plan.speculative_backend ==
+                                                                   SpeculativeBackend::Mtp
+                                                               ? plan.verify_window
+                                                               : 0U,
                                          .backend        = plan.speculative_backend});
     out.prefill_hidden = add_tensor(
         builder, DType::BF16, {TextConfig::hidden, effective_prefill_chunk}, "step prefill hidden");
@@ -253,6 +263,10 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
     const auto chunk  = static_cast<std::int32_t>(chunk_u32);
     const auto drafts = static_cast<std::int32_t>(plan.draft_window);
     const auto verify = drafts + 1;
+    // MTP verifies up to V drafts per round (the MTP proposal plus host drafts); its proposal
+    // and prefill keep the MTP depth K (drafts).
+    const auto mtp_verify_drafts = static_cast<std::int32_t>(plan.verify_window);
+    const auto mtp_verify        = mtp_verify_drafts + 1;
     const ops::CausalAttentionExecutionEnvelope text_envelope{1, plan.capacity};
 
     const auto matrix  = [](WorkspaceLayoutBuilder& layout, DType dtype, std::int32_t rows,
@@ -436,7 +450,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
         out.mtp_prefill = finish(mtp_prefill);
 
         WorkspaceLayoutBuilder mtp_batch;
-        mtp_full_call(mtp_batch, verify, text_envelope, false);
+        mtp_full_call(mtp_batch, mtp_verify, text_envelope, false);
         WorkspaceLayoutBuilder mtp_ar;
         mtp_full_call(mtp_ar, 1, text_envelope, true);
         WorkspaceLayoutBuilder mtp_align;
@@ -444,17 +458,18 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
         WorkspaceLayoutBuilder mtp_proposal;
         proposal_scratch(mtp_proposal, 1);
         const std::size_t accept = ops::speculative_accept_greedy_drafts_workspace_capacity_bytes(
-            TextConfig::token_domain, drafts, drafts, 1, 1);
+            TextConfig::token_domain, mtp_verify_drafts, mtp_verify_drafts, 1, 1);
         out.mtp_round = std::max({accept, finish(mtp_batch), finish(mtp_ar), finish(mtp_proposal)});
         out.ordinary_round = std::max(out.ordinary_round, finish(mtp_align));
 
         for (std::int32_t batch = 1; batch <= static_cast<std::int32_t>(plan.max_concurrency);
              ++batch) {
-            const std::int32_t aggregate = batch * verify;
+            const std::int32_t aggregate = batch * mtp_verify;
             WorkspaceLayoutBuilder target;
             matrix(target, DType::BF16, TextConfig::hidden, aggregate);
             target_body(target, aggregate, aggregate, qwen3_6::TextPhase::Verify,
-                        GdnWorkspacePath::ReplayRecord, batch, verify, verify, text_envelope);
+                        GdnWorkspacePath::ReplayRecord, batch, mtp_verify, mtp_verify,
+                        text_envelope);
 
             const auto mtp_decode_core = [&](WorkspaceLayoutBuilder& layout, std::int32_t width) {
                 const std::int32_t tokens = batch * width;
@@ -473,14 +488,14 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
             };
 
             WorkspaceLayoutBuilder alignment;
-            mtp_decode_core(alignment, verify);
+            mtp_decode_core(alignment, mtp_verify);
             WorkspaceLayoutBuilder ar;
             mtp_decode_core(ar, 1);
             WorkspaceLayoutBuilder proposal;
             proposal_scratch(proposal, batch);
             const std::size_t batch_accept =
                 ops::speculative_accept_greedy_drafts_workspace_capacity_bytes(
-                    TextConfig::token_domain, drafts, drafts, batch, batch);
+                    TextConfig::token_domain, mtp_verify_drafts, mtp_verify_drafts, batch, batch);
             out.mtp_round = std::max({out.mtp_round, finish(target), finish(alignment), finish(ar),
                                       finish(proposal), batch_accept});
         }
@@ -705,6 +720,27 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
         }
         break;
     }
+    if (const NgramOptions& ngram = options.speculative.ngram; ngram.mode != NgramDraftMode::Off) {
+        if (ngram.mode != NgramDraftMode::Chain) {
+            throw std::invalid_argument("unknown n-gram draft mode");
+        }
+        if (options.speculative.backend != SpeculativeBackend::Mtp) {
+            throw std::invalid_argument("n-gram drafts require the MTP backend");
+        }
+        if (ngram.max_drafts < options.speculative.draft_tokens + kNgramWideRoundMargin ||
+            ngram.max_drafts > kMtpVerifyMaximumDrafts) {
+            throw std::invalid_argument("n-gram verify window must be in [draft_tokens+3,15]");
+        }
+        if (ngram.match_tokens == 0 || ngram.match_tokens > NgramDraftPool::kMaximumMatchTokens) {
+            throw std::invalid_argument("n-gram match length must be in [1,64]");
+        }
+        if (ngram.min_drafts == 0 || ngram.min_drafts > ngram.max_drafts) {
+            throw std::invalid_argument("n-gram minimum draft must be in [1,max_drafts]");
+        }
+        if (ngram.pool_bytes < sizeof(std::uint32_t) || ngram.pool_bytes > (4ULL << 30U)) {
+            throw std::invalid_argument("n-gram pool size must be in [4 B,4 GiB]");
+        }
+    }
     if (device.compute_capability() != 89) {
         throw std::invalid_argument("Qwen3.6 family runtime requires compute capability 8.9");
     }
@@ -732,6 +768,8 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->max_concurrency     = inputs.max_concurrency;
     impl->prefill_chunk       = inputs.prefill_chunk;
     impl->draft_window        = inputs.draft_window;
+    impl->verify_window       = inputs.verify_window;
+    impl->ngram               = inputs.ngram;
     // DFlash keeps checkpoint state in its own cyclic mirror that only covers the resident
     // checkpoint; older ring entries could not rebuild it, so the ring stays off there.
     impl->turn_checkpoint_ring =
@@ -755,25 +793,35 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
                                                       "ordinary exact-b graph allowance");
         } else if (impl->speculative_backend == SpeculativeBackend::Mtp) {
             const auto profiles = mtp_graph_profiles(impl->capacity, impl->draft_window);
-            const std::size_t per_batch_allowance = graph_topology_allowance(
-                profiles,
-                [&](GraphExecutionProfile profile) {
-                    const std::uint64_t final_visible = std::min<std::uint64_t>(
-                        impl->capacity,
-                        static_cast<std::uint64_t>(profile.max) + 2ULL * impl->draft_window);
+            // One graph set per round width: K+1, and V+1 when n-gram drafts widen the window.
+            const auto width_allowance = [&](std::uint32_t verify_drafts) {
+                return graph_topology_allowance(
+                    profiles,
+                    [&](GraphExecutionProfile profile) {
+                        // The last AR step sees E+W-1+K keys (W-1 verified drafts, depth K).
+                        const std::uint64_t final_visible = std::min<std::uint64_t>(
+                            impl->capacity, static_cast<std::uint64_t>(profile.max) +
+                                                verify_drafts + impl->draft_window);
 #ifdef NINFER_SM86
-                    if (final_visible <= 4096) {
-                        // The reduced-startup graph set still consumes 35.8 MiB at C1/K3 and
-                        // 43.1 MiB at C1/K4 on SM86. K2 retains the smaller qualified allowance;
-                        // reserve one 64 MiB class for K3 and deeper captures.
-                        return (impl->draft_window >= 3 ? 64ULL : 16ULL) * kMiB;
-                    }
-                    return 86ULL * kMiB;
+                        if (final_visible <= 4096) {
+                            // The reduced-startup graph set still consumes 35.8 MiB at C1/K3 and
+                            // 43.1 MiB at C1/K4 on SM86. K2 retains the smaller qualified
+                            // allowance; reserve one 64 MiB class for K3 and deeper captures.
+                            return (impl->draft_window >= 3 ? 64ULL : 16ULL) * kMiB;
+                        }
+                        return 86ULL * kMiB;
 #else
-                    return (final_visible <= 4096 ? 12ULL : 82ULL) * kMiB;
+                        return (final_visible <= 4096 ? 12ULL : 82ULL) * kMiB;
 #endif
-                },
-                "MTP graph allowance");
+                    },
+                    "MTP graph allowance");
+            };
+            std::size_t per_batch_allowance = width_allowance(impl->draft_window);
+            if (impl->verify_window > impl->draft_window) {
+                per_batch_allowance = checked_add(per_batch_allowance,
+                                                  width_allowance(impl->verify_window),
+                                                  "MTP wide graph allowance");
+            }
             impl->graph_allowance_bytes = checked_mul(per_batch_allowance, impl->max_concurrency,
                                                       "MTP exact-b graph allowance");
         } else {
@@ -816,10 +864,18 @@ make_sequence_planner_impl(DeviceContext& device, const EngineOptions& options,
         .max_concurrency     = options.max_concurrency,
         .prefill_chunk       = std::min(options.prefill_chunk, options.max_context),
         .draft_window        = options.speculative.draft_tokens,
+        // The wide n-gram verify window is disabled until the column-level corruption recorded
+        // in the plan's Stage 5c.3 note is explained, so the MTP verify window stays at the
+        // MTP depth and the wide graph family and record planes are not materialized. Restoring
+        // `ngram.max_drafts` here is the only change needed once that is fixed.
+        .verify_window       = options.speculative.backend == SpeculativeBackend::Mtp
+                                   ? options.speculative.draft_tokens
+                                   : 0U,
         .turn_checkpoint_ring = options.turn_checkpoint_ring,
         .speculative_backend = options.speculative.backend,
         .kv_storage          = options.kv_cache,
         .proposal_head       = options.speculative.proposal_head,
+        .ngram               = options.speculative.ngram,
         .features            = qwen3_6::startup_features(options),
         .use_cuda_graph      = options.use_cuda_graph,
         .causal_scoring      = options.purpose == EnginePurpose::CausalScoring,

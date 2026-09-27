@@ -322,6 +322,16 @@ Json vision_workspace_json(const std::optional<ninfer::VisionWorkspaceMemorySumm
                 {"handoff_peak_bytes", vision->handoff_peak_bytes}};
 }
 
+Json ngram_json(const ninfer::NgramOptions& ngram) {
+    if (ngram.mode == ninfer::NgramDraftMode::Off) {
+        return Json{{"mode", product::ngram_mode_name(ngram.mode)}};
+    }
+    return Json{{"mode", product::ngram_mode_name(ngram.mode)},
+                {"max_drafts", ngram.max_drafts},
+                {"match_tokens", ngram.match_tokens},
+                {"min_drafts", ngram.min_drafts},
+                {"pool_bytes", ngram.pool_bytes}};
+}
 Json speculative_json(const GenerationMetrics& metrics) {
     return Json{{"backend", product::speculative_backend_name(metrics.speculative_backend)},
                 {"draft_window", metrics.speculative_draft_window},
@@ -329,7 +339,11 @@ Json speculative_json(const GenerationMetrics& metrics) {
                 {"drafted_tokens", metrics.speculative_draft_tokens},
                 {"accepted_tokens", metrics.speculative_accepted_tokens},
                 {"fallback_steps", metrics.speculative_fallback_steps},
-                {"accepted_per_position", metrics.speculative_accepted_per_position}};
+                {"accepted_per_position", metrics.speculative_accepted_per_position},
+                {"verify_window", metrics.speculative_verify_window},
+                {"wide_rounds", metrics.speculative_wide_rounds},
+                {"ngram_drafted_tokens", metrics.speculative_ngram_draft_tokens},
+                {"ngram_accepted_tokens", metrics.speculative_ngram_accepted_tokens}};
 }
 
 Json materialization_json(const ninfer::MaterializationDiagnostics& diagnostics) {
@@ -504,6 +518,7 @@ std::string format_server_start_json(
               product::speculative_backend_name(engine_options.speculative.backend)},
              {"speculative_draft_window", engine_options.speculative.draft_tokens},
              {"proposal_head", proposal_head_name(engine_options.speculative.proposal_head)},
+             {"ngram", ngram_json(engine_options.speculative.ngram)},
              {"context_cost", Json{{"transfer_source", ninfer::context_cost_preset_source_name(
                                                            context_cost.transfer_source)},
                                    {"prefill_source", ninfer::context_cost_preset_source_name(

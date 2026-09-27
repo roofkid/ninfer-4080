@@ -76,6 +76,31 @@ int main() {
                   }),
                   "CLI accepted an unsupported DFlash2 draft count");
     }
+    const ninfer::cli::Options ngram =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--spec", "mtp",
+               "--draft-tokens", "3", "--ngram", "chain", "--ngram-max", "12", "--ngram-n", "6",
+               "--ngram-min", "2", "--ngram-pool-mib", "32"});
+    failures += check(ngram.speculative.ngram.mode == ninfer::NgramDraftMode::Chain &&
+                          ngram.speculative.ngram.max_drafts == 12 &&
+                          ngram.speculative.ngram.match_tokens == 6 &&
+                          ngram.speculative.ngram.min_drafts == 2 &&
+                          ngram.speculative.ngram.pool_bytes == 32ULL << 20U,
+                      "CLI did not preserve the n-gram options");
+    for (const std::vector<std::string>& invalid : std::vector<std::vector<std::string>>{
+             {"--spec", "dflash2", "--draft-tokens", "6", "--ngram", "chain"},
+             {"--spec", "mtp", "--draft-tokens", "3", "--ngram", "chain", "--ngram-max", "5"},
+             {"--spec", "mtp", "--draft-tokens", "3", "--ngram", "chain", "--ngram-max", "16"},
+             {"--spec", "mtp", "--draft-tokens", "3", "--ngram", "chain", "--ngram-n", "0"},
+             {"--spec", "mtp", "--draft-tokens", "3", "--ngram", "chain", "--ngram-min", "16"},
+             {"--spec", "mtp", "--draft-tokens", "3", "--ngram", "chain", "--ngram-pool-mib", "0"},
+             {"--spec", "mtp", "--draft-tokens", "3", "--ngram-max", "12"},
+             {"--spec", "mtp", "--draft-tokens", "3", "--ngram", "select"},
+         }) {
+        std::vector<std::string> arguments{"ninfer-cli", "model.ninfer", "--prompt", "hello"};
+        arguments.insert(arguments.end(), invalid.begin(), invalid.end());
+        failures += check(rejects([&] { (void)parse(arguments); }),
+                          "CLI accepted an invalid n-gram configuration");
+    }
     const ninfer::cli::Options nvfp4 =
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype", "nvfp4"});
     failures += check(nvfp4.kv_cache == ninfer::KvCacheStorage::Nvfp4Group16,

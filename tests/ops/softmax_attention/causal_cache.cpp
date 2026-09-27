@@ -2205,6 +2205,8 @@ int run_dflash2_cases() {
         for (int width : {7, 8, 9, 16})
             for (int batch : {1, 8}) failures += run(width, batch, 127, true);
         failures += run(16, 8, 2048, true);
+        // A masked verify width at a depth past the small-T split tile boundary.
+        for (int width : {7, 8}) failures += run(width, 1, 467, true);
         for (int width : {8, 9, 16}) {
             failures +=
                 run_a1_case(kGeometries[0], storage,
@@ -2270,6 +2272,10 @@ int run_geometry(const Geometry& geometry) {
 
         const AttentionCase a1_cases[] = {
             {1, 0, 1, 201u},    {6, 17, 23, 202u},   {7, 17, 512, 203u},
+            // A long-context verify-width window: the small-T tile-split paths begin above the
+            // shallow windows the other width-7 cases use.
+            {7, 467, 512, 206u},
+            {8, 467, 512, 207u},
             {17, 31, 48, 204u}, {66, 63, 129, 205u},
         };
         for (const AttentionCase& test_case : a1_cases) {

@@ -831,6 +831,11 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
+| `--ngram chain` | extend MTP proposals with host n-gram drafts; requires `--spec mtp` (see [cli.md](cli.md#speculative-decoding)) | off |
+| `--ngram-max V` | n-gram chain bound, `draft-tokens + 3 .. 15` (the wider verify window is currently disabled) | `15` |
+| `--ngram-n N` | n-gram lookup key length, `1..64` | `8` |
+| `--ngram-min N` | drop pool extensions shorter than N | `1` |
+| `--ngram-pool-mib M` | host n-gram pool size, `1..4096` | `16` |
 | `--default-max-tokens N` | output limit when omitted by a request | `8192` |
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
 | `--vision` | enable media input and load Vision GPU allocations | off |
@@ -894,7 +899,7 @@ in append mode and flushes every event, so successive model or MTP blocks may sh
 file. The parent directory must already exist. Failure to open the file aborts startup; the log path
 is also rejected if it resolves to the model artifact.
 
-Every line is one `ninfer_serve_request_log` schema-v20 JSON object. All events carry
+Every line is one `ninfer_serve_request_log` schema-v21 JSON object. All events carry
 `timestamp_unix_ms` and a process-unique `server_instance_id`; request IDs are monotonic only within
 that server instance. Successful request-start records include request-scoped acquisition,
 media-preprocessing wall/work, tokenizer, cache hit/miss/single-flight, and payload-size fields;
@@ -922,7 +927,10 @@ preserved for consumer validation, and a stable text-fallback reason. Fallback r
 
 `request_done.timings_seconds` contains `prepare`, `ttft`, `vision`, `prefill`, `decode`, and `total`
 as full-precision JSON numbers. Its `speculative` object contains `backend`, `draft_window`, `rounds`,
-`drafted_tokens`, `accepted_tokens`, `fallback_steps`, and `accepted_per_position`. Rates can be
+`drafted_tokens`, `accepted_tokens`, `fallback_steps`, `accepted_per_position`, `verify_window`,
+`wide_rounds`, `ngram_drafted_tokens`, and `ngram_accepted_tokens` (the n-gram pool's share of the
+drafted and accepted counts). `server_start.engine.ngram` records the n-gram mode and, when it is
+enabled, `max_drafts`, `match_tokens`, `min_drafts`, and `pool_bytes`. Rates can be
 derived downstream from raw token counts and seconds instead of rounded stderr strings.
 
 For `server_start.memory`, `workspace.capacity_bytes` is the only physical workspace allocation.

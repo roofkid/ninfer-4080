@@ -15,6 +15,7 @@
 #include "targets/qwen3_6/impl/runtime/host_kv_extent_store.h"
 #include "targets/qwen3_6/impl/runtime/logical_kv_store.h"
 #include "targets/qwen3_6/impl/runtime/state_image_store.h"
+#include "targets/qwen3_6/impl/runtime/ngram_pool.h"
 #include "targets/qwen3_6/impl/runtime/prefix_identity.h"
 #include "targets/qwen3_6/impl/runtime/resource_projection.h"
 #include "targets/qwen3_6/impl/runtime/text_context.h"
@@ -424,7 +425,9 @@ struct SequenceState {
     std::uint32_t dflash_context_frontier = 0;
     std::array<TokenId, qwen3_6::kMtpDecodeMaximumDrafts> mtp_drafts{};
     std::uint32_t mtp_draft_count = 0;
-    bool tail_hidden_valid        = false;
+    // Token ledger size already observed by the host n-gram pool.
+    std::size_t ngram_observed     = 0;
+    bool tail_hidden_valid         = false;
     bool endpoint_valid           = false;
     RewriteCheckpoint rewrite_checkpoint;
     std::vector<LongAnchorCheckpoint> long_anchors;
@@ -629,6 +632,13 @@ public:
     const std::uint32_t shared_prefix_capacity;
     const std::uint32_t prefill_chunk;
     const std::uint32_t draft_window;
+    // MTP only: the widest verify window V and the width of the round in flight (read at
+    // commit).
+    const std::uint32_t verify_window;
+    std::uint32_t mtp_round_width = 0;
+    const NgramOptions ngram;
+    // Shared by every lane of this Program; only the Engine worker mutates it.
+    std::optional<qwen3_6::NgramDraftPool> ngram_pool;
     const SpeculativeBackend speculative_backend;
     const KvCacheStorage kv_storage;
     const ProposalHead proposal_head;
@@ -661,6 +671,9 @@ public:
     std::unique_ptr<StateImageStore> state_store;
     std::optional<GdnReplayRecords> replay_records;
     std::optional<ops::GdnReplayFoldPlan> replay_fold;
+    // Narrow-width views of the same planes when the verify window exceeds the MTP depth.
+    std::optional<GdnReplayRecords> narrow_replay_records;
+    std::optional<ops::GdnReplayFoldPlan> narrow_replay_fold;
     std::optional<DFlashPersistentState> dflash;
     qwen3_6::RoundState io;
     Tensor prefill_hidden;
@@ -678,6 +691,7 @@ public:
 
     DecodeGraphFamily ordinary_graphs;
     DecodeGraphFamily mtp_graphs;
+    DecodeGraphFamily mtp_wide_graphs;
     DecodeGraphFamily dflash_graphs;
 
     PinnedHostBuffer round_host;
@@ -1224,6 +1238,9 @@ private:
     void release_sequence_state_strict(SequenceState& sequence) noexcept;
     void release_sequence_state(SequenceState& sequence) noexcept;
     void prepare_graphs();
+    // Round-width ReplaySSM views: a K+1 round uses the narrowed planes and its own fold plan.
+    [[nodiscard]] const GdnReplayRecords* round_replay_records(std::uint32_t width) const;
+    [[nodiscard]] const ops::GdnReplayFoldPlan& round_replay_fold(std::uint32_t width) const;
     void install_sampling(SequenceState& sequence, RequestControl& request,
                           const ops::SamplingConfig& config);
     void set_device_i32(Tensor& tensor, std::int32_t value);

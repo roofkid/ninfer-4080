@@ -605,16 +605,20 @@ std::array<std::int32_t, 3> prompt_rope_position(const PreparedPromptData& promp
 }
 
 schedule::MtpCausalAttentionEnvelopes mtp_causal_attention_envelopes(std::uint32_t max_frontier,
+                                                                     std::uint32_t verify_drafts,
                                                                      std::uint32_t k,
                                                                      std::uint32_t capacity) {
     const auto visible = [capacity](std::uint64_t value) {
         return static_cast<std::uint32_t>(std::min<std::uint64_t>(capacity, value));
     };
     schedule::MtpCausalAttentionEnvelopes out;
-    out.target_verify = {1, visible(static_cast<std::uint64_t>(max_frontier) + k + 1ULL)};
+    // Target verify and the MTP alignment batch see E+(W-1)+1 keys; the AR steps continue from
+    // the committed frontier, at most E+W, for K-1 more positions.
+    out.target_verify = {1, visible(static_cast<std::uint64_t>(max_frontier) + verify_drafts + 1ULL)};
     out.batch         = out.target_verify;
     for (std::uint32_t step = 0; step + 1 < k; ++step) {
-        out.ar[step] = {1, visible(static_cast<std::uint64_t>(max_frontier) + k + step + 2ULL)};
+        out.ar[step] = {
+            1, visible(static_cast<std::uint64_t>(max_frontier) + verify_drafts + step + 2ULL)};
     }
     return out;
 }
@@ -750,6 +754,7 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
       continuation_capacity(normalized_private_capacity(plan.context_cache)),
       shared_prefix_capacity(plan.context_cache.max_shared_prefixes.value_or(0)),
       prefill_chunk(plan.prefill_chunk), draft_window(plan.draft_window),
+      verify_window(plan.verify_window), ngram(plan.ngram),
       speculative_backend(plan.speculative_backend), kv_storage(plan.kv_storage),
       proposal_head(plan.proposal_head), vision_enabled(plan.features.vision),
       use_cuda_graph(plan.use_cuda_graph), causal_scoring(plan.causal_scoring),
@@ -808,6 +813,13 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
         (workspace_plan.vision &&
          workspace_plan.vision->general_capacity_bytes != workspace_plan.general_capacity)) {
         throw std::invalid_argument("Qwen3.6 workspace plan does not match startup features");
+    }
+    if (ngram.mode != NgramDraftMode::Off) {
+        ngram_pool.emplace(NgramPoolSpec{
+            .match_tokens = ngram.match_tokens,
+            .entries      = static_cast<std::size_t>(ngram.pool_bytes / sizeof(std::uint32_t)),
+            .token_domain = TextConfig::token_domain,
+        });
     }
     const DeviceSpan backing = persistent.alloc_bytes(plan.persistent.bytes, 256);
     if (!plan.context_cache.max_private_continuations || !plan.context_cache.max_shared_prefixes) {
@@ -878,6 +890,12 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
     if (plan.persistent.replay_records) {
         replay_records.emplace(backing, *plan.persistent.replay_records);
         replay_fold.emplace(*replay_records, state_images->linear().all_layers_view());
+        if (verify_window > draft_window) {
+            narrow_replay_records.emplace(
+                replay_records->narrowed(static_cast<std::int32_t>(draft_window + 1U)));
+            narrow_replay_fold.emplace(*narrow_replay_records,
+                                       state_images->linear().all_layers_view());
+        }
     }
     if (replay_records.has_value() != (speculative_backend != SpeculativeBackend::None) ||
         replay_fold.has_value() != replay_records.has_value()) {
@@ -6637,6 +6655,7 @@ void ProgramImplCore::retire_continuation_slot(std::uint32_t index) noexcept {
     sequence.execution_frontier = 0;
     sequence.ledger_frontier    = 0;
     sequence.ledger.clear();
+    sequence.ngram_observed = 0;
     sequence.prefix_identity.clear();
     sequence.prefix_digests.clear();
     sequence.rope_delta              = 0;
@@ -9874,6 +9893,7 @@ void ProgramImplCore::start_sequence(std::uint32_t lane, SequenceState& sequence
             sequence.rewrite_checkpoint = {};
             ordered_reset(sequence);
             sequence.ledger.clear();
+            sequence.ngram_observed = 0;
             sequence.prefix_digests.clear();
             sequence.text_kv_valid = 0;
             sequence.mtp_kv_valid  = 0;
@@ -9961,6 +9981,7 @@ void ProgramImplCore::start_sequence(std::uint32_t lane, SequenceState& sequence
                                            request_plan.backend_kv_page_entitlement);
             sequence.text_kv_valid = base;
             sequence.ledger.resize(base);
+            sequence.ngram_observed = 0;
             sequence.prefix_digests.truncate(base);
             reserve_state_entitlement(sequence, state_slots);
             refresh_state_views(sequence);
@@ -10010,6 +10031,7 @@ void ProgramImplCore::start_sequence(std::uint32_t lane, SequenceState& sequence
                                            request_plan.backend_kv_page_entitlement);
             sequence.tail_hidden_valid = base == prompt_tokens;
             sequence.ledger.resize(base);
+            sequence.ngram_observed = 0;
             sequence.prefix_digests.truncate(base);
             reserve_state_entitlement(sequence, state_slots);
             refresh_state_views(sequence);
@@ -10037,6 +10059,9 @@ void ProgramImplCore::start_sequence(std::uint32_t lane, SequenceState& sequence
         sequence.mtp_draft_count     = 0;
         sequence.tail_hidden_valid   = base == prompt_tokens && sequence.tail_hidden_valid;
         sequence.ledger.swap(materialization_ledger_);
+        // Every reuse path rebinds the ledger here; the first round reports the whole prompt,
+        // which also makes this request's own history the pool's latest continuations.
+        sequence.ngram_observed = 0;
         sequence.prefix_identity.swap(materialization_identity_);
         sequence.prefix_digests.swap(materialization_prefix_digests_);
         sequence.rebuild_work       = request_plan.root_rebuild_work;
@@ -10143,9 +10168,9 @@ runtime::ExecutionTiming ProgramImplCore::resolve_pending_raw(
         return timing.finish();
     }
 
-    if (!replay_fold) {
-        throw std::logic_error("speculative pending batch has no ReplaySSM records");
-    }
+    // The fold reads the records through the view of the round's width.
+    const ops::GdnReplayFoldPlan& fold = round_replay_fold(
+        speculative_backend == SpeculativeBackend::Mtp ? mtp_round_width : draft_window + 1U);
 
     std::array<ops::GdnReplayFoldRow, kMaximumConcurrency> fold_rows{};
     std::array<std::int32_t, kMaximumConcurrency> hidden_selectors{};
@@ -10191,8 +10216,8 @@ runtime::ExecutionTiming ProgramImplCore::resolve_pending_raw(
     const auto tail_started = Clock::now();
     try {
         timing.resume_submit();
-        replay_fold->execute(std::span<const ops::GdnReplayFoldRow>(fold_rows.data(), lanes.size()),
-                             device.stream);
+        fold.execute(std::span<const ops::GdnReplayFoldRow>(fold_rows.data(), lanes.size()),
+                     device.stream);
 
         // Sparse acceptance reads counts. Publish only the prefix licensed by the Frontend.
         if (speculative_backend == SpeculativeBackend::DFlash2) {
@@ -10276,7 +10301,8 @@ runtime::ExecutionTiming ProgramImplCore::resolve_pending_raw(
     }
 
     const double tail_seconds = std::chrono::duration<double>(Clock::now() - tail_started).count();
-    const std::uint32_t width = draft_window + 1U;
+    const std::uint32_t width =
+        speculative_backend == SpeculativeBackend::Mtp ? mtp_round_width : draft_window + 1U;
     try {
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence = active_sequence(lanes[row]);
@@ -11017,6 +11043,21 @@ void ProgramImplCore::ordered_reset(SequenceState& sequence) {
     sequence.dflash_context_frontier = 0;
 }
 
+const GdnReplayRecords* ProgramImplCore::round_replay_records(std::uint32_t width) const {
+    if (!replay_records) { return nullptr; }
+    if (narrow_replay_records && width == draft_window + 1U) { return &*narrow_replay_records; }
+    if (width != static_cast<std::uint32_t>(replay_records->spec.width)) {
+        throw std::logic_error("round width has no ReplaySSM record view");
+    }
+    return &*replay_records;
+}
+
+const ops::GdnReplayFoldPlan& ProgramImplCore::round_replay_fold(std::uint32_t width) const {
+    if (!replay_fold) { throw std::logic_error("speculative pending batch has no ReplaySSM records"); }
+    if (narrow_replay_fold && width == draft_window + 1U) { return *narrow_replay_fold; }
+    return *replay_fold;
+}
+
 void ProgramImplCore::prepare_graphs() {
     if (!use_cuda_graph) { return; }
     nvtx::ScopedRange prepare_range(nvtx::Name::CudaGraphPrepare, nvtx::Category::Graph);
@@ -11259,29 +11300,58 @@ void ProgramImplCore::prepare_graphs() {
                                             *mtp_host_ingress,
                                             *mtp_host_egress,
                                             state_images->continuation_hidden_store()};
+        mtp_state.execution.replay_records = round_replay_records(draft_window + 1U);
         const GraphExecutionProfile code_warm = planned_profiles.front();
         prepare_representative(code_warm.min, 1);
         device.synchronize();
         schedule::mtp_decode_batch(
-            mtp_state, 1, draft_window,
-            mtp_causal_attention_envelopes(code_warm.max, draft_window, capacity), nullptr);
+            mtp_state, 1, draft_window + 1U, draft_window,
+            mtp_causal_attention_envelopes(code_warm.max, draft_window, draft_window, capacity),
+            nullptr);
         device.synchronize();
 
-        mtp_graphs.profiles.reserve(planned_profiles.size() * max_concurrency);
-        for (std::uint32_t batch_size = 1; batch_size <= max_concurrency; ++batch_size) {
-            for (const GraphExecutionProfile planned : planned_profiles) {
-                mtp_graphs.profiles.emplace_back();
-                DecodeGraphProfile& profile    = mtp_graphs.profiles.back();
-                profile.batch_size             = batch_size;
-                profile.min_execution_frontier = planned.min;
-                profile.max_execution_frontier = planned.max;
-                profile.topology_class =
-                    planned.topology_class * max_concurrency + (batch_size - 1U);
-                schedule::capture_mtp_decode_batch(
-                    mtp_state, static_cast<std::int32_t>(batch_size), draft_window,
-                    mtp_causal_attention_envelopes(planned.max, draft_window, capacity),
-                    profile.definition);
+        // One family per round width: K+1 for MTP-only rounds and, with n-gram drafts, V+1. A
+        // separate family keeps each width's executable installed across alternating rounds.
+        const auto capture_family = [&](DecodeGraphFamily& family, std::uint32_t verify_drafts) {
+            mtp_state.execution.replay_records = round_replay_records(verify_drafts + 1U);
+            family.profiles.reserve(planned_profiles.size() * max_concurrency);
+            for (std::uint32_t batch_size = 1; batch_size <= max_concurrency; ++batch_size) {
+                const auto batch_profiles =
+                    verify_drafts == draft_window
+                        ? planned_profiles
+                        : mtp_wide_graph_profiles(capacity, draft_window, verify_drafts, batch_size,
+                                                  kv_storage);
+                validate_graph_profiles(batch_profiles, capacity - 1, "MTP wide");
+                for (const GraphExecutionProfile planned : batch_profiles) {
+                    family.profiles.emplace_back();
+                    DecodeGraphProfile& profile    = family.profiles.back();
+                    profile.batch_size             = batch_size;
+                    profile.min_execution_frontier = planned.min;
+                    profile.max_execution_frontier = planned.max;
+                    profile.topology_class =
+                        planned.topology_class * max_concurrency + (batch_size - 1U);
+                    schedule::capture_mtp_decode_batch(
+                        mtp_state, static_cast<std::int32_t>(batch_size), verify_drafts + 1U,
+                        draft_window,
+                        mtp_causal_attention_envelopes(planned.max, verify_drafts, draft_window,
+                                                       capacity),
+                        profile.definition);
+                }
             }
+        };
+        capture_family(mtp_graphs, draft_window);
+        if (verify_window > draft_window) {
+            // Load the wide routes' modules before capturing them.
+            mtp_state.execution.replay_records = round_replay_records(verify_window + 1U);
+            prepare_representative(code_warm.min, 1);
+            device.synchronize();
+            schedule::mtp_decode_batch(
+                mtp_state, 1, verify_window + 1U, draft_window,
+                mtp_causal_attention_envelopes(code_warm.max, verify_window, draft_window,
+                                               capacity),
+                nullptr);
+            device.synchronize();
+            capture_family(mtp_wide_graphs, verify_window);
         }
     }
     if (is_masked_draft_backend(speculative_backend)) {
@@ -11337,6 +11407,9 @@ void ProgramImplCore::prepare_graphs() {
     }
     if (speculative_backend == SpeculativeBackend::Mtp) {
         instantiate_graph_family(mtp_graphs, "MTP", device, prepare_representative);
+        if (!mtp_wide_graphs.profiles.empty()) {
+            instantiate_graph_family(mtp_wide_graphs, "MTP wide", device, prepare_representative);
+        }
     }
     if (is_masked_draft_backend(speculative_backend)) {
         instantiate_graph_family(dflash_graphs, "DFlash", device, prepare_representative);
@@ -11384,11 +11457,15 @@ void ProgramImplCore::install_sampling(SequenceState& sequence, RequestControl& 
     Tensor counts = token_counts.slice(1, static_cast<std::int32_t>(sequence.lane), 1)
                         .view({TextConfig::token_domain});
     request.sampling_host     = config;
+    // MTP rounds can verify up to V drafts, so acceptance is counted over the verify window.
+    const std::uint32_t verified_positions =
+        speculative_backend == SpeculativeBackend::Mtp ? verify_window : draft_window;
     request.speculative_stats = SpeculativeStats{
         .backend               = speculative_backend,
         .enabled               = speculative_backend != SpeculativeBackend::None,
         .draft_window          = draft_window,
-        .accepted_per_position = std::vector<std::uint64_t>(draft_window, 0),
+        .accepted_per_position = std::vector<std::uint64_t>(verified_positions, 0),
+        .verify_window         = speculative_backend == SpeculativeBackend::Mtp ? verify_window : 0U,
     };
     const bool penalties = request.sampling_host.presence_penalty != 0.0F ||
                            request.sampling_host.frequency_penalty != 0.0F;
@@ -11950,7 +12027,6 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
         throw std::invalid_argument("MTP batch membership is invalid");
     }
 
-    const std::uint32_t width      = draft_window + 1;
     std::uint32_t maximum_frontier = 0;
     for (std::size_t row = 0; row < lanes.size(); ++row) {
         const std::uint32_t lane = lanes[row];
@@ -11977,6 +12053,49 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
         maximum_frontier = std::max(maximum_frontier, sequence.execution_frontier);
     }
 
+    // Row drafts: the MTP proposal, extended from the n-gram pool when enabled. The round verifies
+    // the full window V only when some row's usable draft pays for it; otherwise it keeps the MTP
+    // width K+1 and its graph set.
+    std::array<TokenId, kMaximumConcurrency * kMtpVerifyMaximumDrafts> row_drafts{};
+    std::array<std::uint32_t, kMaximumConcurrency> usable_drafts{};
+    std::array<std::uint32_t, kMaximumConcurrency> proposal_drafts{};
+    for (std::size_t row = 0; row < lanes.size(); ++row) {
+        SequenceState& sequence = active_sequence(lanes[row]);
+        proposal_drafts[row]    = sequence.mtp_draft_count;
+        const std::span<const TokenId> proposal(sequence.mtp_drafts.data(),
+                                                sequence.mtp_draft_count);
+        const std::span<TokenId> drafts(row_drafts.data() + row * kMtpVerifyMaximumDrafts,
+                                        verify_window);
+        std::size_t count = proposal.size();
+        if (ngram_pool) {
+            ngram_pool->observe(sequence.ledger, sequence.ngram_observed);
+            sequence.ngram_observed = sequence.ledger.size();
+            std::array<TokenId, NgramDraftPool::kMaximumMatchTokens + kMtpDecodeMaximumDrafts>
+                context{};
+            count = chain_ngram_drafts(*ngram_pool, sequence.ledger, proposal, ngram.min_drafts,
+                                       context, drafts);
+        } else {
+            std::copy(proposal.begin(), proposal.end(), drafts.begin());
+        }
+        const std::uint32_t max_by_budget = budgets[row].generated_tokens_remaining > 1
+                                                ? budgets[row].generated_tokens_remaining - 1
+                                                : 0;
+        usable_drafts[row] = std::min({static_cast<std::uint32_t>(count), max_by_budget,
+                                       capacity - sequence.execution_frontier - 1});
+    }
+    // The wide (n-gram) verify window is disabled: the planner keeps `verify_window == draft_window`
+    // until the column-level corruption recorded in the plan's Stage 5c.3 note is explained, so a
+    // round verifies at most the MTP width K and longer extensions are clipped at verify time.
+    // `ngram_round_verify_drafts` stays the single policy decision once the window is restored.
+    const std::uint32_t round_drafts =
+        ngram_pool ? ngram_round_verify_drafts(
+                         std::span<const std::uint32_t>(usable_drafts.data(), lanes.size()),
+                         draft_window, verify_window)
+                   : draft_window;
+    const std::uint32_t width     = round_drafts + 1;
+    const bool wide_round         = round_drafts != draft_window;
+    DecodeGraphFamily& mtp_family = wide_round ? mtp_wide_graphs : mtp_graphs;
+
     const auto started = Clock::now();
     try {
         std::optional<nvtx::ScopedRange> submit_range;
@@ -11984,35 +12103,31 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                              static_cast<std::uint64_t>(lanes.size()));
         DecodeGraphExecutable* executable = nullptr;
         schedule::MtpCausalAttentionEnvelopes envelopes =
-            mtp_causal_attention_envelopes(maximum_frontier, draft_window, capacity);
+            mtp_causal_attention_envelopes(maximum_frontier, round_drafts, draft_window, capacity);
         if (use_cuda_graph) {
             DecodeGraphProfile& profile =
-                select_graph_profile(mtp_graphs, static_cast<std::uint32_t>(lanes.size()),
+                select_graph_profile(mtp_family, static_cast<std::uint32_t>(lanes.size()),
                                      maximum_frontier, "MTP batch");
-            executable = &install_graph_profile(mtp_graphs, profile, "MTP batch");
-            envelopes = mtp_causal_attention_envelopes(profile.max_execution_frontier, draft_window,
-                                                       capacity);
+            executable = &install_graph_profile(mtp_family, profile, "MTP batch");
+            envelopes = mtp_causal_attention_envelopes(profile.max_execution_frontier,
+                                                       round_drafts, draft_window, capacity);
         }
 
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence           = active_sequence(lanes[row]);
             const RequestControl& request     = requests[lanes[row]];
             const std::uint32_t frontier      = sequence.execution_frontier;
-            const std::uint32_t max_by_budget = budgets[row].generated_tokens_remaining > 1
-                                                    ? budgets[row].generated_tokens_remaining - 1
-                                                    : 0;
-            const std::uint32_t extent =
-                std::min({sequence.mtp_draft_count, draft_window, max_by_budget,
-                          capacity - sequence.execution_frontier - 1});
+            const std::uint32_t extent        = std::min(usable_drafts[row], round_drafts);
             mtp_host_ingress->anchors[row]        = sequence.ledger.back();
             mtp_host_ingress->base_frontiers[row] = checked_i32(frontier, "MTP batch frontier");
             mtp_host_ingress->remaining_budgets[row] =
                 checked_i32(budgets[row].generated_tokens_remaining, "MTP batch remaining budget");
             mtp_host_ingress->current_extents[row]      = static_cast<std::int32_t>(extent);
             mtp_host_ingress->target_valid_columns[row] = static_cast<std::int32_t>(extent + 1);
-            for (std::uint32_t j = 0; j < draft_window; ++j) {
-                mtp_host_ingress->current_drafts[row * draft_window + j] =
-                    j < extent ? sequence.mtp_drafts[j] : sequence.ledger.back();
+            for (std::uint32_t j = 0; j < round_drafts; ++j) {
+                mtp_host_ingress->current_drafts[row * round_drafts + j] =
+                    j < extent ? row_drafts[row * kMtpVerifyMaximumDrafts + j]
+                               : sequence.ledger.back();
             }
             for (std::uint32_t j = 0; j < width; ++j) {
                 const std::uint32_t position = frontier + std::min(j, extent);
@@ -12033,7 +12148,7 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
         }
 
         schedule::MtpBatchContext schedule_state{{device, model, work, state_images->linear(),
-                                                  replay_records ? &*replay_records : nullptr, io,
+                                                  round_replay_records(width), io,
                                                   prefill_hidden, prefill_chunk, proposal_head},
                                                  decoder->text_kv,
                                                  *decoder->mtp_cache(),
@@ -12043,7 +12158,8 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                                                  state_images->continuation_hidden_store()};
 
         mark_workspace_usage(workspace_plan.mtp_round);
-        schedule::mtp_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
+        mtp_round_width = width;
+        schedule::mtp_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()), width,
                                    draft_window, envelopes, executable);
         submit_range.reset();
         timing.begin_wait();
@@ -12077,6 +12193,7 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             validate_licensed_tokens(row_tokens);
             const std::uint32_t pcur =
                 static_cast<std::uint32_t>(mtp_host_ingress->current_extents[row]);
+            if (wide_round) { request.speculative_stats.wide_rounds += 1; }
             if (pcur == 0) {
                 request.speculative_stats.fallback_steps += 1;
             } else {
@@ -12087,6 +12204,10 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                     request.speculative_stats.accepted_per_position[static_cast<std::size_t>(i)] +=
                         1;
                 }
+                const DraftSourceCounts sources = draft_source_counts(
+                    pcur, proposal_drafts[row], static_cast<std::uint32_t>(accepted_i));
+                request.speculative_stats.ngram_drafted_tokens += sources.ngram_drafted;
+                request.speculative_stats.ngram_accepted_tokens += sources.ngram_accepted;
             }
             request.pending = PendingCandidate{
                 .kind          = PendingKind::Speculative,

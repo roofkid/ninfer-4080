@@ -12,9 +12,10 @@ using namespace ninfer::test;
 
 namespace {
 
-int run_case(int k, const std::vector<std::int32_t>& accepted) {
+// V verify drafts (T=V+1 verified columns) and K MTP proposal steps.
+int run_case(int v, int k, const std::vector<std::int32_t>& accepted) {
     const int batch           = static_cast<int>(accepted.size());
-    const int T               = k + 1;
+    const int T               = v + 1;
     constexpr int max_context = 128;
 
     std::vector<std::int32_t> verify(static_cast<std::size_t>(T * batch));
@@ -93,11 +94,11 @@ int run_case(int k, const std::vector<std::int32_t>& accepted) {
     Tensor t_valid(d_valid.data(), DType::I32, {batch, steps});
     ops::mtp_prepare_next_round(t_verify, t_anchors, t_accepted, t_frontiers, t_budgets, t_licensed,
                                 t_rope_deltas, t_alignment, t_extents, t_positions,
-                                t_rope_positions, t_valid, max_context, nullptr);
+                                t_rope_positions, t_valid, k, max_context, nullptr);
     cuda_synchronize();
 
-    const std::string label =
-        "mtp next round K=" + std::to_string(k) + " B=" + std::to_string(batch);
+    const std::string label = "mtp next round V=" + std::to_string(v) + " K=" + std::to_string(k) +
+                              " B=" + std::to_string(batch);
     int failures =
         verify_exact((label + " alignment").c_str(),
                      from_device<std::int32_t>(d_alignment.data(), expected_alignment.size()),
@@ -133,9 +134,15 @@ int main() {
     }
 
     int failures = 0;
-    failures += run_case(1, {0});
-    failures += run_case(5, {0, 2, 5});
-
+    // Every verify width T=V+1 in [K+1,16] for every proposal depth K: no acceptance, a partial
+    // prefix, and the full verify window (the last row is also budget-limited).
+    for (int k = 1; k <= 5; ++k) {
+        for (int v = k; v <= 15; ++v) {
+            failures += run_case(v, k, {0, v / 2, v});
+        }
+    }
+    failures += run_case(1, 1, {0});
+    failures += run_case(15, 3, {0, 1, 3, 4, 7, 11, 14, 15});
     if (failures != 0) {
         std::cerr << "mtp_round failures=" << failures << '\n';
         return 1;

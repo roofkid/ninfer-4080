@@ -244,6 +244,15 @@ void print_generation_summary(const ninfer::GenerationResult& result,
             }
             print_metric(backend + " accepted by pos", positions.str());
         }
+        if (speculative.verify_window > speculative.draft_window) {
+            print_metric("ngram verify window", std::to_string(speculative.verify_window));
+            print_metric("ngram wide rounds", std::to_string(speculative.wide_rounds));
+            print_metric("ngram drafted tokens", std::to_string(speculative.ngram_drafted_tokens));
+            print_metric("ngram accepted tokens",
+                         std::to_string(speculative.ngram_accepted_tokens));
+            print_metric("ngram acceptance rate", format_percent(speculative.ngram_accepted_tokens,
+                                                                 speculative.ngram_drafted_tokens));
+        }
     }
 }
 

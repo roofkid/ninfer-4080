@@ -34,6 +34,8 @@ void ServeMetrics::record(const GenerationOutcome& outcome) {
     prefix_cache_hit_tokens_total_ += cached;
     speculative_draft_tokens_total_ += m.speculative_draft_tokens;
     speculative_accepted_tokens_total_ += m.speculative_accepted_tokens;
+    ngram_draft_tokens_total_ += m.speculative_ngram_draft_tokens;
+    ngram_accepted_tokens_total_ += m.speculative_ngram_accepted_tokens;
     last_completed_.prompt_tokens = static_cast<int>(prompt);
     // Clamped like computed_prefill above: a cache figure reported larger
     // than the prompt must not advertise more resident tokens than exist.
@@ -63,6 +65,8 @@ std::string ServeMetrics::render(std::uint32_t max_concurrency,
     append_counter(out, "ninfer:prefix_cache_hit_tokens_total", prefix_cache_hit_tokens_total_);
     append_counter(out, "ninfer:draft_tokens_total", speculative_draft_tokens_total_);
     append_counter(out, "ninfer:draft_accepted_tokens_total", speculative_accepted_tokens_total_);
+    append_counter(out, "ninfer:ngram_draft_tokens_total", ngram_draft_tokens_total_);
+    append_counter(out, "ninfer:ngram_draft_accepted_tokens_total", ngram_accepted_tokens_total_);
     return out;
 }
 

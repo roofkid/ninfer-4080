@@ -484,6 +484,10 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     outcome.metrics.speculative_fallback_steps  = result.speculative.fallback_steps;
     outcome.metrics.speculative_accepted_per_position =
         std::move(result.speculative.accepted_per_position);
+    outcome.metrics.speculative_verify_window         = result.speculative.verify_window;
+    outcome.metrics.speculative_ngram_draft_tokens    = result.speculative.ngram_drafted_tokens;
+    outcome.metrics.speculative_ngram_accepted_tokens = result.speculative.ngram_accepted_tokens;
+    outcome.metrics.speculative_wide_rounds           = result.speculative.wide_rounds;
 
     outcome.tool_calls      = std::move(result.tool_calls);
     outcome.tool_call_parse = result.tool_call_parse;

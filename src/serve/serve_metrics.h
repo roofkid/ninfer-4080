@@ -54,6 +54,8 @@ private:
     std::uint64_t prefix_cache_hit_tokens_total_     = 0;
     std::uint64_t speculative_draft_tokens_total_    = 0;
     std::uint64_t speculative_accepted_tokens_total_ = 0;
+    std::uint64_t ngram_draft_tokens_total_          = 0;
+    std::uint64_t ngram_accepted_tokens_total_       = 0;
     LastCompleted last_completed_;
 };
 

@@ -947,6 +947,7 @@ ProgramImplCore::restore_continuation(std::span<const std::uint8_t> snapshot,
         sequence.lane = static_cast<std::uint32_t>(*free_row);
 
         sequence.ledger.assign(ledger.begin(), ledger.end());
+        sequence.ngram_observed = 0;
         sequence.prefix_identity.restore(std::move(token_types), std::move(positions),
                                          std::move(vision_items), std::move(rewrite_frontiers));
         sequence.prefix_identity.reserve(static_cast<std::size_t>(capacity) + 1ULL);

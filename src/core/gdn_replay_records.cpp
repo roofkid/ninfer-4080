@@ -121,6 +121,21 @@ GdnReplayRecords::GdnReplayRecords(DeviceSpan backing, const GdnReplayRecordLayo
       value(layout.value.bind(backing)), gate(layout.gate.bind(backing)), spec(layout.spec) {
     validate_layout(layout);
 }
+GdnReplayRecords GdnReplayRecords::narrowed(std::int32_t width) const {
+    validate_spec(spec);
+    if (width < 2 || width > spec.width) {
+        throw std::out_of_range("GDN replay narrowed width must be in [2,record width]");
+    }
+    const std::int32_t outer = checked_outer_extent(spec);
+    GdnReplayRecords out;
+    out.spec       = spec;
+    out.spec.width = width;
+    out.conv       = Tensor(conv.data, DType::BF16, {spec.conv_channels, width, outer});
+    out.key        = Tensor(key.data, DType::BF16, {spec.key_dim, spec.qk_heads, width, outer});
+    out.value = Tensor(value.data, DType::BF16, {spec.value_dim, spec.value_heads, width, outer});
+    out.gate  = Tensor(gate.data, DType::FP32, {2, spec.value_heads, width, outer});
+    return out;
+}
 
 GdnReplayRecordLayer GdnReplayRecords::layer(std::int32_t layer_index, std::int32_t rows) const {
     validate_spec(spec);

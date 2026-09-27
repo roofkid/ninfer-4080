@@ -153,7 +153,14 @@ void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,
                                      const PagedKVLayerView& cache,
                                      CausalAttentionExecutionEnvelope envelope,
                                      WorkspaceArena& workspace, Tensor& out, cudaStream_t stream);
-
+/**
+ * Opaque launch-topology class of causal_softmax_attention at width T, batch B and one execution
+ * envelope. Two executions with equal classes launch the same kernel sequence, so a CUDA Graph
+ * captured for one can be updated to the other; different classes need separate executables.
+ */
+[[nodiscard]] std::uint32_t causal_softmax_attention_topology_class(
+    AttentionHeadGeometry geometry, KvCacheStorage cache_storage,
+    CausalAttentionExecutionEnvelope envelope, std::int32_t tokens, std::int32_t batch_size);
 /**
  * Return transient capacity for every W in the inclusive interval at one exact batch size. The
  * head geometry, cache dtype, and execution envelope are fixed implementation-profile inputs.

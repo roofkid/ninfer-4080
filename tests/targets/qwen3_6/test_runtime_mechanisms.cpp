@@ -188,6 +188,52 @@ void test_round_layout() {
            "K=15 DFlash storage is backend-owned");
     expect(!dflash.mtp.has_value() && !dflash.mtp_decode.has_value(),
            "DFlash layout does not allocate MTP storage");
+
+    // MTP verify window V=15 with proposal depth K=3 sizes the decode verify frame at V+1 while
+    // the prefill proposal keeps K.
+    ninfer::LayoutBuilder wide_builder;
+    q36::RoundStateLayout wide = q36::begin_round_state_layout(
+        wide_builder, q36::RoundStateSpec{.hidden        = 32,
+                                          .output_rows   = 128,
+                                          .draft_window  = 3,
+                                          .verify_window = 15,
+                                          .backend = ninfer::SpeculativeBackend::Mtp});
+    q36::complete_round_state_layout(wide_builder, wide);
+    (void)wide_builder.finish(256);
+    expect(wide.mtp.has_value() && wide.mtp->draft_tokens.shape[0] == 3 &&
+               wide.mtp->target_input_ids.shape[0] == 4,
+           "MTP prefill proposal keeps depth K");
+    expect(wide.mtp_decode.has_value() && wide.mtp_decode->verify_ids.shape[0] == 16 &&
+               wide.mtp_decode->target_hidden.shape[1] == 16 &&
+               wide.mtp_decode->ar_positions.shape[1] == 2,
+           "MTP verify window V=15 sizes the decode frame and keeps K-1 AR steps");
+
+    bool rejected = false;
+    try {
+        ninfer::LayoutBuilder bad_builder;
+        (void)q36::begin_round_state_layout(
+            bad_builder, q36::RoundStateSpec{.hidden        = 32,
+                                             .output_rows   = 128,
+                                             .draft_window  = 5,
+                                             .verify_window = 3,
+                                             .backend = ninfer::SpeculativeBackend::Mtp});
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    expect(rejected, "an MTP verify window below the proposal depth is rejected");
+
+    rejected = false;
+    try {
+        ninfer::LayoutBuilder wrong_backend_builder;
+        (void)q36::begin_round_state_layout(
+            wrong_backend_builder, q36::RoundStateSpec{.hidden        = 32,
+                                                       .output_rows   = 128,
+                                                       .verify_window = 4,
+                                                       .backend = ninfer::SpeculativeBackend::None});
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    expect(rejected, "a non-MTP verify window is rejected");
 }
 
 void test_mtp_alignment() {

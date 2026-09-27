@@ -170,6 +170,24 @@ may be combined with `--vision`.
   --lm-head-draft
 ```
 
+With MTP, `--ngram chain` extends each round's MTP proposal with host n-gram drafts in the style
+of llama.cpp `ngram-mod`: a shared pool maps the hash of the last `--ngram-n` tokens (default 8) to
+the token that last followed them, and the proposal continues from it for up to `--ngram-max`
+drafts in total (default 15, range `draft-tokens + 3 .. 15`). Extensions shorter than
+`--ngram-min` (default 1) are dropped; `--ngram-pool-mib` (default 16) sizes the pool. The engine
+currently verifies at most the MTP width `draft-tokens`, so a longer pool extension is clipped
+at verify time; the wider n-gram verify window is disabled pending a fix (the maintainer plan
+records the exact failure). Greedy verification keeps the output of the non-speculative
+route up to floating-point ties. The summary reports the pool's drafted and accepted tokens and
+the wide rounds:
+
+```bash
+./build/apps/ninfer models/qwen3_6_35b_a3b.ninfer \
+  --prompt "Rewrite this file with one change: ..." \
+  --spec mtp --draft-tokens 3 --lm-head-draft \
+  --ngram chain --ngram-max 15
+```
+
 For DFlash:
 
 ```bash
@@ -207,6 +225,11 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
+| `--ngram chain` | extend MTP proposals with host n-gram drafts; requires `--spec mtp` | off |
+| `--ngram-max V` | n-gram verify window, `draft-tokens + 3 .. 15` | `15` |
+| `--ngram-n N` | n-gram lookup key length, `1..64` | `8` |
+| `--ngram-min N` | drop pool extensions shorter than N | `1` |
+| `--ngram-pool-mib M` | host n-gram pool size, `1..4096` | `16` |
 | `--vision` | enable image/video input and load Vision GPU allocations | off |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
 | `--no-thinking` | disable thinking in prompt rendering | thinking on |

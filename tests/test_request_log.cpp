@@ -57,6 +57,8 @@ int main() {
     options.speculative.backend            = ninfer::SpeculativeBackend::Mtp;
     options.speculative.draft_tokens       = 3;
     options.speculative.proposal_head      = ninfer::ProposalHead::Optimized;
+    options.speculative.ngram.mode         = ninfer::NgramDraftMode::Chain;
+    options.speculative.ngram.max_drafts   = 12;
     options.enable_vision                  = false;
     options.allow_prefix_reuse             = true;
     options.preserve_thinking              = true;
@@ -200,6 +202,12 @@ int main() {
                       "speculative backend missing");
     failures +=
         check(server.at("engine").at("proposal_head") == "optimized", "proposal head missing");
+    failures += check(server.at("engine").at("ngram").at("mode") == "chain" &&
+                          server.at("engine").at("ngram").at("max_drafts") == 12 &&
+                          server.at("engine").at("ngram").at("match_tokens") == 8 &&
+                          server.at("engine").at("ngram").at("min_drafts") == 1 &&
+                          server.at("engine").at("ngram").at("pool_bytes") == 16ULL << 20U,
+                      "n-gram options missing");
     failures += check(
         server.at("engine").at("context_cost").at("transfer_source") == "external" &&
             server.at("engine").at("context_cost").at("prefill_source") == "compiled-default" &&
@@ -399,6 +407,10 @@ int main() {
     outcome.metrics.speculative_accepted_tokens       = 720;
     outcome.metrics.speculative_fallback_steps        = 2;
     outcome.metrics.speculative_accepted_per_position = {290, 240, 190};
+    outcome.metrics.speculative_verify_window         = 15;
+    outcome.metrics.speculative_wide_rounds           = 40;
+    outcome.metrics.speculative_ngram_draft_tokens    = 210;
+    outcome.metrics.speculative_ngram_accepted_tokens = 95;
     outcome.metrics.materialization                   = {
                           .predicted_now_ns           = 200000,
                           .predicted_future_loss_ns   = 50000,
@@ -471,6 +483,11 @@ int main() {
     failures +=
         check(done.at("speculative").at("accepted_per_position") == Json::array({290, 240, 190}),
               "speculative position counts missing");
+    failures += check(done.at("speculative").at("verify_window") == 15 &&
+                          done.at("speculative").at("wide_rounds") == 40 &&
+                          done.at("speculative").at("ngram_drafted_tokens") == 210 &&
+                          done.at("speculative").at("ngram_accepted_tokens") == 95,
+                      "n-gram draft counters missing");
     failures += check(done.at("materialization").at("predicted_total_ns") == 250000 &&
                           done.at("materialization").at("targets_evaluated") == 7 &&
                           done.at("materialization").at("stop_reason") == "queue_exhausted" &&
@@ -490,7 +507,8 @@ int main() {
         pretty_done.message ==
             "req#7 done | openai-chat | output limit | prompt 401 | output 1,024 | cache 101 "
             "(25.2%, response replay) | TTFT 358 ms | total 5.7s | prefill 1.28k tok/s | "
-            "decode 191.4 tok/s | mtp accepted 720/900 (80.0%) | thinking 256/256, control 19",
+            "decode 191.4 tok/s | mtp accepted 720/900 (80.0%) | ngram accepted 95/210, wide 40 "
+            "| thinking 256/256, control 19",
         "pretty request-done record mismatch");
 
     GenerationOutcome normalized_tool_outcome = outcome;

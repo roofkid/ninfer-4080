@@ -78,12 +78,32 @@ enum class SpeculativeBackend : std::uint8_t {
     DFlash,
     DFlash2,
 };
+// Host n-gram drafts (llama.cpp ngram-mod style) chained after the MTP proposal.
+enum class NgramDraftMode : std::uint8_t {
+    Off,
+    // Each row verifies the MTP proposal followed by the pool's continuation of it.
+    Chain,
+};
 
+struct NgramOptions {
+    NgramDraftMode mode = NgramDraftMode::Off;
+    // Verify window V: drafts per round, MTP proposal plus pool extension, in
+    // [draft_tokens + 3, 15]. A round uses V only when some row's draft reaches draft_tokens + 3.
+    std::uint32_t max_drafts = 15;
+    // n: tokens in the pool lookup key, [1,64].
+    std::uint32_t match_tokens = 8;
+    // A pool extension shorter than this is dropped, [1,max_drafts].
+    std::uint32_t min_drafts = 1;
+    // Host pool table, 4 bytes per entry, allocated once at startup.
+    std::uint64_t pool_bytes = 16ULL << 20U;
+};
 struct SpeculativeOptions {
     SpeculativeBackend backend = SpeculativeBackend::None;
     // Startup-fixed K: MTP 1..5; DFlash and DFlash2 1..15 (query width K+1).
     std::uint32_t draft_tokens = 0;
     ProposalHead proposal_head = ProposalHead::Full;
+    // Requires the MTP backend.
+    NgramOptions ngram;
 };
 
 enum class StartupPhase : std::uint8_t {
@@ -717,6 +737,13 @@ struct SpeculativeStats {
     std::uint64_t accepted_tokens = 0;
     std::uint64_t fallback_steps  = 0;
     std::vector<std::uint64_t> accepted_per_position;
+    // MTP: the widest verify window V; above draft_window when n-gram drafts are enabled.
+    std::uint32_t verify_window = 0;
+    // N-gram pool share of drafted_tokens/accepted_tokens; the rest came from the MTP head.
+    std::uint64_t ngram_drafted_tokens  = 0;
+    std::uint64_t ngram_accepted_tokens = 0;
+    // Rounds verified at the n-gram window V instead of the MTP width.
+    std::uint64_t wide_rounds = 0;
 };
 
 struct ThinkingBudgetStats {

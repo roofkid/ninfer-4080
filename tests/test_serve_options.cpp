@@ -222,6 +222,20 @@ int main() {
                           dflash_vision.speculative.draft_tokens == 15,
                       "serve options did not preserve combined DFlash and Vision features");
 
+    const ServeOptions ngram =
+        parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens", "3", "--ngram",
+               "chain", "--ngram-max", "15", "--ngram-n", "8", "--ngram-pool-mib", "16"});
+    failures += check(ngram.speculative.ngram.mode == ninfer::NgramDraftMode::Chain &&
+                          ngram.speculative.ngram.max_drafts == 15 &&
+                          ngram.speculative.ngram.match_tokens == 8 &&
+                          ngram.speculative.ngram.pool_bytes == 16ULL << 20U,
+                      "serve options did not preserve the n-gram options");
+    bool ngram_without_mtp_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--spec", "dflash2", "--draft-tokens", "6",
+                     "--ngram", "chain"});
+    } catch (const std::invalid_argument&) { ngram_without_mtp_rejected = true; }
+    failures += check(ngram_without_mtp_rejected, "--ngram chain was accepted without MTP");
     bool implicit_backend_rejected = false;
     try {
         (void)parse({"ninfer-serve", "model.ninfer", "--draft-tokens", "3"});

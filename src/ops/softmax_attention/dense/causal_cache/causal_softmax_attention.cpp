@@ -399,6 +399,18 @@ const char* causal_attention_route_name(CausalAttentionRoute route) {
 
 } // namespace detail
 
+std::uint32_t causal_softmax_attention_topology_class(AttentionHeadGeometry geometry,
+                                                      KvCacheStorage cache_storage,
+                                                      CausalAttentionExecutionEnvelope envelope,
+                                                      std::int32_t tokens,
+                                                      std::int32_t batch_size) {
+    if (!valid_attention_head_geometry(geometry) || tokens <= 0 || batch_size <= 0 ||
+        batch_size > 8 || (batch_size > 1 && tokens > kMaximumVerifyTokens)) {
+        throw std::invalid_argument("causal_softmax_attention_topology_class: invalid profile");
+    }
+    return static_cast<std::uint32_t>(detail::causal_attention_resolve_route(
+        geometry.query_heads, tokens, batch_size, cache_storage, envelope));
+}
 std::size_t causal_softmax_attention_workspace_capacity_bytes(
     AttentionHeadGeometry geometry, KvCacheStorage cache_storage,
     CausalAttentionExecutionEnvelope envelope, std::int32_t batch_size, std::int32_t min_width,
