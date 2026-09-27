@@ -19,6 +19,7 @@ constexpr std::int32_t kGateUpRows = 34816;
 constexpr std::int32_t kOutputRows = kGateUpRows / 2;
 constexpr std::int32_t kChunkCols  = 64;
 constexpr std::int32_t kGemvColumns = 8;
+constexpr std::int32_t kTallColumns = 64;
 
 // proj is a column-major [2*rows, cols] FP32 plane; out is column-major [rows, cols] BF16.
 __global__ void q3_swiglu_epilogue_kernel(const float* __restrict__ proj,
@@ -165,7 +166,7 @@ std::size_t q3_linear_swiglu_workspace_capacity_bytes(std::int32_t min_tokens,
     if (min_tokens <= 0 || max_tokens < min_tokens) {
         throw std::invalid_argument("q3 linear_swiglu workspace: invalid token interval");
     }
-    if (max_tokens <= kGemvColumns) { return 0; }
+    if (max_tokens <= kGemvColumns || min_tokens >= kTallColumns) { return 0; }
     const std::int64_t columns = std::min<std::int32_t>(max_tokens, kChunkCols - 1);
     return static_cast<std::size_t>(2 * kOutputRows) * static_cast<std::size_t>(columns) *
            sizeof(float);
@@ -188,6 +189,10 @@ void q3_linear_swiglu_dispatch(const Tensor& x, const Weight& w, Tensor& out, Wo
             static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(out.data),
             kOutputRows, x.ne[0], columns, static_cast<std::int32_t>(w.padded_shape[1]));
         CUDA_CHECK(cudaGetLastError());
+        return;
+    }
+    if (columns >= kTallColumns) {
+        launch_q3_mma_tall_swiglu_r64_c128(x, w, out, stream);
         return;
     }
     auto scope  = ws.scope();

@@ -208,6 +208,7 @@ add_library(ninfer_ops STATIC
   ops/linear/q4/q4_dispatch.cpp
   ops/linear/q3/q3_rowsplit_gemv.cu
   ops/linear/q3/q3_rowsplit_gemm_mma.cu
+  ops/linear/q3/q3_rowsplit_tall_mma.cu
   ops/linear/q3/q3_dispatch.cpp
   ops/linear/q5/q5_dispatch.cpp
   ops/linear/q5/q5_rowsplit_gemm_mma.cu
