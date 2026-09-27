@@ -88,6 +88,13 @@ Json normative_directory() {
                          {"layout", "row-scale-v1"},
                          {"offset", 3584},
                          {"bytes", 260}},
+                        {{"name", "q3"},
+                         {"kind", "tensor"},
+                         {"shape", {2, 130}},
+                         {"format", "Q3G128_F16S"},
+                         {"layout", "row-split-k128-v1"},
+                         {"offset", 4096},
+                         {"bytes", 264}},
                     })},
     };
 }
@@ -113,10 +120,12 @@ void test_registered_sizes() {
     const std::array<std::uint64_t, 2> q6_shape  = {1, 64};
     const std::array<std::uint64_t, 2> w8_shape  = {1, 33};
     const std::array<std::uint64_t, 2> fp8_shape = {2, 4};
+    const std::array<std::uint64_t, 2> q3_shape  = {2, 130};
 
     if (tensor_encoded_size(direct, NumericFormat::BF16, shape_2x3) != 12 ||
         tensor_encoded_size(direct, NumericFormat::FP32, {}) != 4 ||
         tensor_encoded_size(direct, NumericFormat::I32, shape_2) != 8 ||
+        tensor_encoded_size(rows, NumericFormat::Q3G128_F16S, q3_shape) != 264 ||
         tensor_encoded_size(rows, NumericFormat::Q4G64_F16S, q4_shape) != 260 ||
         tensor_encoded_size(rows, NumericFormat::Q5G64_F16S, q5_shape) != 528 ||
         tensor_encoded_size(rows, NumericFormat::Q6G64_F16S, q6_shape) != 516 ||
@@ -135,13 +144,13 @@ void test_normative_fixture() {
     auto fixture = write_fixture(normative_directory(), "valid");
     Reader reader(fixture.path);
     if (reader.identity().model_id != "fixture-model" ||
-        reader.identity().weights_id != "fixture-weights" || reader.objects().size() != 9 ||
+        reader.identity().weights_id != "fixture-weights" || reader.objects().size() != 10 ||
         reader.payload_offset() != 4096) {
         throw std::runtime_error("fixture root descriptor mismatch");
     }
 
-    const std::array<std::string_view, 9> expected_names = {
-        "resource", "bf16", "fp32_scalar", "i32", "q4", "q5", "q6", "w8", "fp8_row",
+    const std::array<std::string_view, 10> expected_names = {
+        "resource", "bf16", "fp32_scalar", "i32", "q4", "q5", "q6", "w8", "fp8_row", "q3",
     };
     for (std::size_t i = 0; i < expected_names.size(); ++i) {
         const auto& object = reader.objects()[i];
@@ -179,6 +188,12 @@ void test_common_validation() {
         directory["objects"][5]["bytes"] = 527;
         auto fixture                     = write_fixture(directory, "wrong_encoded_size");
         expect_artifact_error([&] { Reader reader(fixture.path); }, "wrong encoded size");
+    }
+    {
+        auto directory                   = normative_directory();
+        directory["objects"][9]["bytes"] = 263;
+        auto fixture                     = write_fixture(directory, "q3_wrong_encoded_size");
+        expect_artifact_error([&] { Reader reader(fixture.path); }, "q3 wrong encoded size");
     }
     {
         auto directory                    = normative_directory();

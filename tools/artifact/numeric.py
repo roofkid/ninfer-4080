@@ -50,6 +50,7 @@ BF16 = DirectFormat("BF16", 2)
 FP32 = DirectFormat("FP32", 4)
 I32 = DirectFormat("I32", 4)
 
+Q3G128_F16S = QuantFormat("Q3G128_F16S", 3, 128, -4, 3)
 Q4G64_F16S = QuantFormat("Q4G64_F16S", 4, 64, -8, 7)
 Q5G64_F16S = QuantFormat("Q5G64_F16S", 5, 64, -16, 15)
 Q6G64_F16S = QuantFormat("Q6G64_F16S", 6, 64, -32, 31)
@@ -64,7 +65,7 @@ DIRECT_FORMATS = MappingProxyType(
 QUANT_FORMATS = MappingProxyType(
     {
         item.name: item
-        for item in (Q4G64_F16S, Q5G64_F16S, Q6G64_F16S, W8G32_F16S)
+        for item in (Q3G128_F16S, Q4G64_F16S, Q5G64_F16S, Q6G64_F16S, W8G32_F16S)
     }
 )
 NVFP4_FORMATS = MappingProxyType({NVFP4.name: NVFP4})
@@ -163,6 +164,7 @@ __all__ = [
     "NVFP4_FORMATS",
     "Nvfp4Format",
     "NumericFormat",
+    "Q3G128_F16S",
     "Q4G64_F16S",
     "Q5G64_F16S",
     "Q6G64_F16S",

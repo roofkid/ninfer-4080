@@ -37,6 +37,7 @@ enum class QType : std::uint16_t {
     I32_CTRL             = 6,
     NVFP4                = 7,
     FP8_E4M3FN_ROW_BF16S = 8,
+    Q3G128_F16S          = 9,
 };
 
 enum class QuantLayout : std::uint16_t {

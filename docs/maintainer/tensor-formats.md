@@ -1,13 +1,13 @@
 # NInfer Persistent Tensor Numeric Formats
 
-This reference defines the nine persistent numeric tensor formats accepted by current `.ninfer`
+This reference defines the ten persistent numeric tensor formats accepted by current `.ninfer`
 artifacts: their logical words, quantization semantics, canonical reference encoders where
 applicable, and conformance boundaries. Container framing, physical byte layouts, checkpoint
 assignment, kernels, and runtime-state codecs are defined separately.
 
 ## 1. Registered formats
 
-NInfer has exactly nine persistent numeric tensor formats in four categories.
+NInfer has exactly ten persistent numeric tensor formats in four categories.
 
 Direct scalar formats preserve one logical scalar word per tensor element:
 
@@ -21,6 +21,7 @@ Grouped quantized-weight formats preserve signed codes plus one scale per logica
 
 | Canonical name | Code width | Group size | Legal signed codes | Scale | Full-group logical bits/weight |
 |---|---:|---:|---:|---|---:|
+| `Q3G128_F16S` | 3 | 128 | `[-4, 3]` | one binary16 scale/group | 3.125 |
 | `Q4G64_F16S` | 4 | 64 | `[-8, 7]` | one binary16 scale/group | 4.25 |
 | `Q5G64_F16S` | 5 | 64 | `[-16, 15]` | one binary16 scale/group | 5.25 |
 | `Q6G64_F16S` | 6 | 64 | `[-32, 31]` | one binary16 scale/group | 6.25 |
@@ -53,7 +54,9 @@ layout, shape, checkpoint, or GPU can consume it.
 
 The design deliberately preserves the currently used group sizes. Q4, Q5, and Q6 share one G64
 group geometry, allowing their converter, codec, and kernel structures to share the same grouping
-model. W8 retains the single implemented G32 geometry. The registered Qwen3.6-27B target provides
+model. The registered Q3 scheme keeps its source G128 geometry because no coarser grouping fits
+the 16 GB target that selected it. W8 retains the single implemented G32 geometry. The registered
+Qwen3.6-27B target provides
 the current implementation evidence for these choices. These are accepted project geometries, not
 claims that G64 or G32 is universally optimal.
 
@@ -95,7 +98,7 @@ A **quantization scheme** defines only the persistent logical representation of 
 - the validity rules for codes and scales;
 - the mathematical reconstruction of each represented weight.
 
-The six quantized names above identify schemes in this sense. Their meanings are immutable: a
+The seven quantized names above identify schemes in this sense. Their meanings are immutable: a
 consumer must not infer a different zero point, scale geometry, code range, or reconstruction rule
 from context.
 
@@ -105,7 +108,7 @@ An **encoder profile** defines how source floating-point values are converted in
 scales of a scheme. Scale selection, rounding order, calibration, clipping, and error optimization
 belong here.
 
-NInfer defines one canonical encoder profile for the four grouped signed-integer schemes in
+NInfer defines one canonical encoder profile for the five grouped signed-integer schemes in
 Section 7. That encoder provides their defined baseline and independent artifact oracle. A
 checkpoint-specific process may use another documented encoder to produce one of those schemes—for
 example, an upstream error-optimized recipe—but that does not create a new quantization scheme if
@@ -154,7 +157,7 @@ exactly the same direct words or logical codes and scales. The currently registe
 `contiguous-le-v1` for direct words, `row-split-k128-v1` for grouped signed-integer formats, and
 `blockscale-k16-m128x4-v1` for `NVFP4`, and `row-scale-v1` for
 `FP8_E4M3FN_ROW_BF16S`. Their byte order, plane packing, padding, swizzle, divisor placement, and
-alignment rules belong to the layout registry, not to these nine numeric formats.
+alignment rules belong to the layout registry, not to these ten numeric formats.
 
 ### 2.7 Compute profile and kernel support
 
@@ -264,11 +267,11 @@ Q4G64_F16S
 └──────── 4-bit signed integer weight codes
 ```
 
-`Q5G64_F16S` and `Q6G64_F16S` follow the same convention. `W8G32_F16S` retains the established W8
+`Q3G128_F16S`, `Q5G64_F16S`, and `Q6G64_F16S` follow the same convention. `W8G32_F16S` retains the established W8
 spelling for the signed 8-bit weight path. The different leading letter does not imply activation
 quantization or a generic family distinction beyond the exact rules in this document.
 
-These four names are identifiers, not a grammar. A parser must compare a name against this closed
+These five names are identifiers, not a grammar. A parser must compare a name against this closed
 registry; it must not accept an unknown combination by splitting a name into components.
 Abbreviations such as `Q4`, `Q5`, `Q6`, `W8G32`, and `INT32` may be used in explanatory prose only.
 
@@ -356,7 +359,7 @@ concerns and are not persistent fields of this format.
 
 ### 4.1 Shape and group axis
 
-For the four grouped signed-integer schemes, let a logical quantized weight tensor have rank
+For the five grouped signed-integer schemes, let a logical quantized weight tensor have rank
 `r >= 1`, a positive `K`, and shape:
 
 ```text
@@ -372,7 +375,7 @@ identifies an independent logical row. For a leading coordinate vector `p` and e
 group(p, k) = (p, floor(k / G))
 ```
 
-where `G` is 64 for Q4/Q5/Q6 and 32 for W8. A group never crosses a row boundary or any leading
+where `G` is 64 for Q4/Q5/Q6, 128 for Q3, and 32 for W8. A group never crosses a row boundary or any leading
 dimension. For a rank-3 expert bank `[E, N, K]`, for example, each `(expert, row)` pair is quantized
 independently; a group cannot cross from one expert to another.
 
@@ -410,16 +413,17 @@ them at its own boundary. A logical encoder produces no physical padding.
 
 ## 5. Grouped signed-integer code domains
 
-All four schemes are zero-point-free, weight-only signed-integer schemes. “Symmetric” in this
+All five schemes are zero-point-free, weight-only signed-integer schemes. “Symmetric” in this
 document means that reconstruction is `scale * signed_code` with zero point zero. It does not mean
 that every legal interval has equal positive and negative magnitude.
 
-### 5.1 Q4, Q5, and Q6
+### 5.1 Q3, Q4, Q5, and Q6
 
 The logical code is a two's-complement signed integer of the stated width:
 
 | Scheme | Width | Sign bit | Legal code interval | `qmax` used by reference encoder |
 |---|---:|---:|---:|---:|
+| `Q3G128_F16S` | 3 | `0x4` | `[-4, 3]` | 3 |
 | `Q4G64_F16S` | 4 | `0x8` | `[-8, 7]` | 7 |
 | `Q5G64_F16S` | 5 | `0x10` | `[-16, 15]` | 15 |
 | `Q6G64_F16S` | 6 | `0x20` | `[-32, 31]` | 31 |
@@ -508,7 +512,8 @@ padding, alignment, indexes, integrity data, and layout-specific duplication. It
 as the exact `.ninfer` artifact size.
 
 The apparently finer W8 group is intentional. Q4, Q5, and Q6 retain one shared G64 grouping model
-across their existing converter, codec, and kernel paths, while W8G32 is the one current W8
+across their existing converter, codec, and kernel paths, Q3G128 is the one registered G128
+geometry for the 16 GB target, and W8G32 is the one current W8
 geometry used by the registered Qwen3.6-27B recipe. The assignment of that geometry to model roles
 belongs to checkpoint recipes, not to the scheme definition. Its 16-bit scale contributes 0.5 bit
 per weight at G32, while the scale contributes 0.25 bit per weight to Q4 at G64; both are 6.25% of
@@ -520,7 +525,7 @@ not independent quality evidence or a claim that G32 is universally optimal.
 ### 7.1 Purpose and input boundary
 
 The canonical profile identity is `MAXABS_F16_RECIP_RNE_V1`. NInfer owns exactly one current
-canonical profile for the four grouped signed-integer schemes, providing conversion consistency,
+canonical profile for the five grouped signed-integer schemes, providing conversion consistency,
 converter parity, and artifact verification. It is a per-row, per-group symmetric
 maximum-absolute-value encoder. It fixes the arithmetic order used by the registered converter.
 Direct division during code selection is not interchangeable with its reciprocal-multiply order at
@@ -597,7 +602,7 @@ reciprocal and always produces positive-zero scale and zero codes.
 
 The scheme identity is determined by the persistent representation and reconstruction contract,
 not by how a converter found its codes. A documented upstream, calibrated, or error-optimized
-encoder may emit the same four schemes if all output codes and scales satisfy Sections 4 through 6.
+encoder may emit the same five schemes if all output codes and scales satisfy Sections 4 through 6.
 
 Such an encoder is not an implicit NInfer user option and cannot silently replace the canonical
 reference path. Its exact recipe and provenance belong to the selected checkpoint's quantization
@@ -702,7 +707,7 @@ meanings defined here.
 
 ## 9. Checkpoint and model boundary
 
-This registry does not say where any of the nine formats are used. A checkpoint numeric-format
+This registry does not say where any of the ten formats are used. A checkpoint numeric-format
 document must separately define, for every persisted source tensor or derived tensor:
 
 - its source checkpoint identity and source tensor or derivation;
@@ -730,8 +735,8 @@ The registry contains no implicit or reserved support for:
 
 - other direct scalar types, including `FP16`, `FP64`, signed widths other than `I32`, and unsigned
   integers;
-- other integer widths, including Q2 and Q3;
-- alternate group sizes for the four accepted code widths;
+- other integer widths, including Q2 and unregistered three-bit variants;
+- alternate group sizes for the five accepted code widths;
 - asymmetric or affine quantization with zero points;
 - per-channel schemes disguised as an arbitrary group size;
 - codebook formats such as NF4;
@@ -805,7 +810,7 @@ enum spellings or private kernel layout. The retained codec and encoder evidence
 
 - exact representative BF16, FP32, and I32 word round trips, including signed zeros, subnormals, NaN
   payload bits, and integer extrema, plus rejection of implicit cross-type encoding;
-- Q4, Q5, Q6, and W8 plane bit order, legal interval endpoints, encoded-size geometry, partial-K zero
+- Q3, Q4, Q5, Q6, and W8 plane bit order, legal interval endpoints, encoded-size geometry, partial-K zero
   padding, consecutive row views, and arbitrary row gathers;
 - all 16 E2M1 words, all 256 E4M3FN words, NVFP4 scale/divisor validity, the exact divisor-based
   reconstruction equation, and known block-scale swizzle offsets;
@@ -840,18 +845,18 @@ This decision leaves directory, metadata encoding, integrity, sharding, and phys
 to the container and layout contracts. This numeric-format decision does not leave the following
 questions open:
 
-- persistent quantized weights use the four grouped signed-integer identities, the exact `NVFP4`
+- persistent quantized weights use the five grouped signed-integer identities, the exact `NVFP4`
   identity, or the exact `FP8_E4M3FN_ROW_BF16S` identity; no spelling constructs another scheme;
 - direct persistent tensors use only `BF16`, `FP32`, and `I32`, with the exact logical words in
   Section 3.1;
 - quantization groups run along the final logical dimension and never cross a leading coordinate;
-- the four grouped signed-integer formats use one finite nonnegative binary16 multiplier per group,
+- the five grouped signed-integer formats use one finite nonnegative binary16 multiplier per group,
   with codes and reconstruction defined in Sections 5 and 6;
 - `NVFP4` uses E2M1 codes, one E4M3FN scale per K-axis group of 16, and one positive FP32 matrix
   divisor under Section 3.3;
 - `FP8_E4M3FN_ROW_BF16S` uses finite E4M3FN codes and one nonnegative finite BF16 multiplier per
   logical matrix row under Section 3.4;
-- the canonical `MAXABS_F16_RECIP_RNE_V1` encoder applies only to the four grouped signed-integer
+- the canonical `MAXABS_F16_RECIP_RNE_V1` encoder applies only to the five grouped signed-integer
   formats and uses FP16-rounded scale followed by binary32 reciprocal-multiply;
 - the container, checkpoint recipe, compute profile, and runtime-state codecs remain separate
   contracts.

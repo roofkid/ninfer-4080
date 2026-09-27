@@ -419,9 +419,9 @@ correctly without carrying it.
 The native implementation in `tools/artifact/`, `tools/convert/`, and `src/artifact/` satisfies
 this layer. The compact evidence retained for later changes is:
 
-- Python version-2 round trips for all nine numeric formats and a raw resource;
+- Python version-2 round trips for all ten numeric formats and a raw resource;
 - representative framing, schema, offset/alignment, overlap, bounds, and encoded-size failures;
-- exact representative direct-word, Q4/Q5/Q6/W8 code/scale, NVFP4 block-scale, and row-scaled FP8
+- exact representative direct-word, Q3/Q4/Q5/Q6/W8 code/scale, NVFP4 block-scale, and row-scaled FP8
   layout round trips;
 - an independently constructed C++ version-2 fixture covering hierarchical identity, payload spans,
   encoded sizes, and alignment;

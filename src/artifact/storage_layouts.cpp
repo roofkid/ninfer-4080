@@ -43,6 +43,8 @@ QuantGeometry quant_geometry(NumericFormat format) {
         return {64, 32, 16};
     case NumericFormat::W8G32_F16S:
         return {32, 32, 0};
+    case NumericFormat::Q3G128_F16S:
+        return {128, 48, 0};
     default:
         throw ArtifactError("row-split-k128-v1 requires a grouped quantized format");
     }
@@ -78,6 +80,8 @@ std::string_view format_name(NumericFormat format) noexcept {
         return "Q6G64_F16S";
     case NumericFormat::W8G32_F16S:
         return "W8G32_F16S";
+    case NumericFormat::Q3G128_F16S:
+        return "Q3G128_F16S";
     case NumericFormat::NVFP4:
         return "NVFP4";
     case NumericFormat::FP8_E4M3FN_ROW_BF16S:

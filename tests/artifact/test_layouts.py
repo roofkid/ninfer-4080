@@ -105,10 +105,31 @@ def test_row_split_geometry_and_encoded_size_are_derived_from_format_and_shape()
         0,
     )
 
+    q3 = row_split_geometry("Q3G128_F16S", (2, 130))
+    assert (
+        q3.k_pad,
+        q3.groups_per_row,
+        q3.base_row_bytes,
+        q3.high_bytes,
+        q3.high_offset,
+        q3.scale_offset,
+        q3.scale_bytes,
+        q3.payload_bytes,
+    ) == (256, 2, 96, 0, 256, 256, 8, 264)
+    assert encoded_size("row-split-k128-v1", "Q3G128_F16S", (2, 130)) == 264
+    q3_full = row_split_geometry("Q3G128_F16S", (1, 5120))
+    assert (
+        q3_full.k_pad,
+        q3_full.groups_per_row,
+        q3_full.base_row_bytes,
+        q3_full.scale_row_bytes,
+    ) == (5120, 40, 1920, 80)
+
 
 @pytest.mark.parametrize(
     ("format_name", "k", "prefix", "base_prefix", "high_prefix"),
     [
+        ("Q3G128_F16S", 129, (-4, -3, -2, -1, 0, 1, 2, 3), b"\xac\x8f\x68", b""),
         ("Q4G64_F16S", 65, (-8, -7, -1, 0, 1, 7), b"\x98\x0f\x71", b""),
         ("Q5G64_F16S", 65, (-16, -15, -1, 0, 1, 15), b"\x10\x0f\xf1", b"\x07"),
         (
@@ -150,6 +171,77 @@ def test_row_split_plane_bit_order_and_round_trip(
     assert torch.equal(decoded_scales, scales)
     assert torch.equal(decoded_codes, codes)
 
+
+def _q3_stream_bytes(codes: torch.Tensor) -> bytes:
+    """Independent bit-level encoder for the registered three-bit plane."""
+
+    groups, group_size = codes.shape
+    out = bytearray(groups * group_size * 3 // 8)
+    for group in range(groups):
+        for index in range(group_size):
+            word = int(codes[group, index]) & 0x7
+            for bit in range(3):
+                if (word >> bit) & 1:
+                    offset = group * group_size * 3 + 3 * index + bit
+                    out[offset // 8] |= 1 << (offset % 8)
+    return bytes(out)
+
+
+def test_q3g128_independent_oracle_round_trip_and_partial_group():
+    shape = (3, 130)
+    geometry = row_split_geometry("Q3G128_F16S", shape)
+    generator = torch.Generator().manual_seed(20260926)
+    physical = torch.randint(
+        -4, 4, (shape[0], geometry.groups_per_row, 128), generator=generator, dtype=torch.int32
+    ).to(torch.int8)
+    physical.reshape(shape[0], geometry.k_pad)[:, shape[1] :] = 0
+    scales = (
+        torch.rand((shape[0], geometry.groups_per_row), generator=generator, dtype=torch.float32)
+        + 0.25
+    ).to(torch.float16)
+    payload = encode_row_split(physical, scales, "Q3G128_F16S", shape)
+
+    assert payload[: geometry.base_bytes] == _q3_stream_bytes(
+        physical.reshape(shape[0] * geometry.groups_per_row, 128)
+    )
+    decoded_scales, decoded_codes = decode_row_split_codes(payload, "Q3G128_F16S", shape)
+    assert torch.equal(decoded_scales, scales)
+    assert torch.equal(decoded_codes, physical)
+
+    group_scales = scales.double().repeat_interleave(128, dim=1)[:, : shape[1]]
+    oracle = (
+        physical.reshape(shape[0], geometry.k_pad)[:, : shape[1]].double() * group_scales
+    ).to(torch.bfloat16)
+    assert torch.equal(dequantize_row_split(payload, "Q3G128_F16S", shape), oracle)
+    exact = physical.reshape(shape[0], geometry.k_pad)[:, : shape[1]].float() * group_scales.float()
+    assert torch.equal(
+        dequantize_row_split(payload, "Q3G128_F16S", shape, dtype=torch.float32), exact
+    )
+
+
+def test_q3g128_gathers_and_standalone_assembly():
+    shape = (4, 130)
+    geometry = row_split_geometry("Q3G128_F16S", shape)
+    codes = (
+        torch.arange(shape[0] * geometry.groups_per_row * 128, dtype=torch.int32)
+        .remainder(8)
+        .sub(4)
+        .to(torch.int8)
+        .reshape(shape[0], geometry.groups_per_row, 128)
+    )
+    codes.reshape(shape[0], geometry.k_pad)[:, shape[1] :] = 0
+    scales = torch.tensor(
+        [[0.25, 0.5], [0.5, 1.0], [1.0, 1.5], [1.5, 2.0]], dtype=torch.float16
+    )
+    payload = encode_row_split(codes, scales, "Q3G128_F16S", shape)
+
+    gathered = gather_row_planes(payload, geometry, [3, 1])
+    gathered_payload = assemble_row_planes(gathered, "Q3G128_F16S", shape[1])
+    gathered_scales, gathered_codes = decode_row_split_codes(
+        gathered_payload, "Q3G128_F16S", (2, shape[1])
+    )
+    assert torch.equal(gathered_scales, scales[[3, 1]])
+    assert torch.equal(gathered_codes, codes[[3, 1]])
 
 def test_consecutive_views_arbitrary_gathers_and_standalone_assembly():
     format_name = "Q5G64_F16S"

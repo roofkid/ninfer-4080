@@ -20,6 +20,7 @@ StorageLayout storage_layout_for(NumericFormat format) {
     case NumericFormat::Q5G64_F16S:
     case NumericFormat::Q6G64_F16S:
     case NumericFormat::W8G32_F16S:
+    case NumericFormat::Q3G128_F16S:
         return StorageLayout::RowSplitK128V1;
     case NumericFormat::NVFP4:
         return StorageLayout::BlockScaleK16M128x4V1;
@@ -45,6 +46,8 @@ QType qtype_for(NumericFormat format) {
         return QType::Q6G64_F16S;
     case NumericFormat::W8G32_F16S:
         return QType::W8G32_F16S;
+    case NumericFormat::Q3G128_F16S:
+        return QType::Q3G128_F16S;
     case NumericFormat::NVFP4:
         return QType::NVFP4;
     case NumericFormat::FP8_E4M3FN_ROW_BF16S:

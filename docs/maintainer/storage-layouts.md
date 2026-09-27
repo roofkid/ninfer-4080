@@ -12,7 +12,7 @@ The storage registry contains exactly these identities:
 | Identity | Kind | Compatible numeric formats | Logical shape | Object alignment |
 |---|---|---|---|---:|
 | `contiguous-le-v1` | tensor layout | `BF16`, `FP32`, `I32` | rank `0..16` | 256 bytes |
-| `row-split-k128-v1` | tensor layout | `Q4G64_F16S`, `Q5G64_F16S`, `Q6G64_F16S`, `W8G32_F16S` | rank 2 `[N,K]` | 256 bytes |
+| `row-split-k128-v1` | tensor layout | `Q3G128_F16S`, `Q4G64_F16S`, `Q5G64_F16S`, `Q6G64_F16S`, `W8G32_F16S` | rank 2 `[N,K]` | 256 bytes |
 | `blockscale-k16-m128x4-v1` | tensor layout | `NVFP4` | rank 2 `[N,K]`, `N % 128 == 0`, `K % 64 == 0` | 256 bytes |
 | `row-scale-v1` | tensor layout | `FP8_E4M3FN_ROW_BF16S` | rank 2 `[N,K]` | 256 bytes |
 | `raw-bytes-v1` | resource encoding | not applicable | nonempty byte string | 1 byte |
@@ -88,6 +88,7 @@ group size `G`:
 
 | Format | `b` | `G` | Base bytes per group `B` | High bytes per group `H` |
 |---|---:|---:|---:|---:|
+| `Q3G128_F16S` | 3 | 128 | 48 | 0 |
 | `Q4G64_F16S` | 4 | 64 | 32 | 0 |
 | `Q5G64_F16S` | 5 | 64 | 32 | 8 |
 | `Q6G64_F16S` | 6 | 64 | 32 | 16 |
@@ -102,8 +103,8 @@ logical_groups     = ceil_div(K, G)
 physical_group_cnt = N * groups_per_row
 ```
 
-`K_pad` is physical geometry and is not added to the JSON `shape`. Because both registered group
-sizes divide 128, `groups_per_row` is integral.
+`K_pad` is physical geometry and is not added to the JSON `shape`. Because every registered group
+size divides 128, `groups_per_row` is integral.
 
 For the final partially logical group, lanes whose column is at least `K` have signed code zero. Its
 scale remains the scale of the logical group defined by the numeric-format contract. Any complete
@@ -122,7 +123,7 @@ zero padding to a 256-byte boundary
 binary16 scale plane
 ```
 
-Q4 and W8 have no high-bit bytes. They still place the scale plane at the first 256-byte boundary
+Q3, Q4, and W8 have no high-bit bytes. They still place the scale plane at the first 256-byte boundary
 after the base-code plane. There is no padding after the scale plane inside the object.
 
 Within every plane, traversal order is:
@@ -150,6 +151,16 @@ base[j] = (u[2*j] & 0x0f) | ((u[2*j + 1] & 0x0f) << 4)
 Thus the even lane is in the low nibble and the odd lane is in the high nibble. Every G64 group
 occupies 32 base bytes.
 
+For Q3G128_F16S, let `u[i] = q[i] modulo 8` be lane `i`'s unsigned three-bit two's-complement
+word. Each G128 group is one dense little-endian bitstream: word `i` occupies stream bits `3i`
+through `3i + 2`, and stream bit `t` is bit `(t mod 8)` of byte `floor(t / 8)`. Equivalently, bytes
+`3j` through `3j + 2` hold the little-endian 24-bit word
+
+```text
+u[8j] | (u[8j+1] << 3) | ... | (u[8j+7] << 21)
+```
+
+so every G128 group occupies 48 base bytes and there is no high-bit plane.
 For W8, each lane occupies one byte containing its exact 8-bit two's-complement word. Lane `i`
 occupies byte `i`, so every G32 group occupies 32 base bytes. The numeric-format restriction that
 excludes code `-128` remains in force.
