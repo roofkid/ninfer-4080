@@ -64,6 +64,11 @@ struct SuiteEntry {
 };
 
 constexpr SuiteEntry kQwen27bEntries[] = {
+    {"27b.gsq3_attention_qkv", QType::Q3G128_F16S, 14336, 5120, TClass::Continuous},
+    {"27b.gsq3_gdn_qkvz", QType::Q3G128_F16S, 16384, 5120, TClass::Continuous},
+    {"27b.gsq3_attention_output", QType::Q3G128_F16S, 5120, 6144, TClass::Continuous},
+    {"27b.gsq3_gate_up", QType::Q3G128_F16S, 34816, 5120, TClass::Continuous},
+    {"27b.gsq3_down", QType::Q3G128_F16S, 5120, 17408, TClass::Continuous},
     {"27b.output_head", QType::Q6G64_F16S, 248320, 5120, TClass::Continuous},
     {"27b.draft_head", QType::Q4G64_F16S, 131072, 5120, TClass::Continuous},
     {"27b.gdn_output_gate", QType::Q5G64_F16S, 6144, 5120, TClass::Continuous},
@@ -228,6 +233,8 @@ std::string lower(std::string_view text) {
 
 const char* qtype_name(QType qtype) {
     switch (qtype) {
+    case QType::Q3G128_F16S:
+        return "Q3";
     case QType::Q4G64_F16S:
         return "Q4";
     case QType::Q5G64_F16S:
@@ -257,6 +264,7 @@ const char* policy_name(LinearPolicy policy) {
 
 QType parse_qtype(std::string_view text) {
     const std::string value = lower(text);
+    if (value == "q3" || value == "q3g128_f16s") { return QType::Q3G128_F16S; }
     if (value == "q4" || value == "q4g64_f16s") { return QType::Q4G64_F16S; }
     if (value == "q5" || value == "q5g64_f16s") { return QType::Q5G64_F16S; }
     if (value == "q6" || value == "q6g64_f16s") { return QType::Q6G64_F16S; }
@@ -330,8 +338,8 @@ Sweep parse_sweep(std::string_view text) {
 void usage(const char* argv0) {
     std::fprintf(stderr,
                  "Usage:\n"
-                 "  %s --qtype Q4|Q5|Q6|W8|BF16|NVFP4|FP8 --n N --k K --t T [options]\n"
-                 "  %s --qtype Q4|Q5|Q6|W8|BF16|NVFP4|FP8 --n N --k K --sweep START:END[:STEP] "
+                 "  %s --qtype Q3|Q4|Q5|Q6|W8|BF16|NVFP4|FP8 --n N --k K --t T [options]\n"
+                 "  %s --qtype Q3|Q4|Q5|Q6|W8|BF16|NVFP4|FP8 --n N --k K --sweep START:END[:STEP] "
                  "[options]\n"
                  "  %s --suite qwen3_6_27b|qwen3_6_35b_a3b|all [options]\n\n"
                  "Options:\n"

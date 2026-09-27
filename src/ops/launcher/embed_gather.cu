@@ -118,6 +118,17 @@ void embed_gather_q6_launch(const Tensor& ids, const Weight& table, Tensor& out,
     CUDA_CHECK(cudaGetLastError());
 }
 
+void embed_gather_q4_launch(const Tensor& ids, const Weight& table, Tensor& out,
+                            cudaStream_t stream) {
+    const std::int32_t d = out.ne[0];
+    const std::int32_t T = ids.ne[0];
+    const std::int64_t n = static_cast<std::int64_t>(d) * T;
+    embed_gather_q4_kernel<<<grid_for(n), kBlock, 0, stream>>>(
+        static_cast<const std::int32_t*>(ids.data), static_cast<const std::uint8_t*>(table.qdata),
+        static_cast<const std::uint8_t*>(table.scales), static_cast<__nv_bfloat16*>(out.data), d,
+        T, table.padded_shape[1]);
+    CUDA_CHECK(cudaGetLastError());
+}
 void embed_gather_w8_launch(const Tensor& ids, const Weight& table, Tensor& out,
                             cudaStream_t stream) {
     const std::int32_t d = out.ne[0];

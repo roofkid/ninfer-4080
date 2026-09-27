@@ -10,6 +10,7 @@ namespace ninfer::test::linear_add {
 
 enum class WeightFormat : std::uint8_t {
     BF16,
+    Q3G128F16S,
     Q5G64F16S,
     W8G32F16S,
 };

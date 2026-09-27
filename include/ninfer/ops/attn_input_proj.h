@@ -95,4 +95,14 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_gate_value_weight,
 void attn_input_proj(const Tensor& x, const Weight& query_key_value_weight, Tensor& q, Tensor& k,
                      Tensor& v, cudaStream_t stream);
 
+/**
+ * Two-parent form with caller-owned transient storage. Registered operand geometry is the same
+ * as the convenience form; the Q3G128_F16S pair composes one projection buffer through the
+ * qualified Q3 linear route and publishes the four final allocations. A16 only.
+ */
+void attn_input_proj(const Tensor& x, const Weight& query_key_weight,
+                     const Weight& gate_value_weight, Tensor& q, Tensor& gate, Tensor& k,
+                     Tensor& v, LinearPolicy policy, WorkspaceArena& workspace,
+                     cudaStream_t stream);
+
 } // namespace ninfer::ops

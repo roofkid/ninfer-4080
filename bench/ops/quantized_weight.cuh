@@ -36,19 +36,22 @@ namespace detail {
 
 struct QuantizedGeometry {
     std::int32_t group_size;
+    std::int32_t low_bytes_per_group;
     std::int32_t high_bytes_per_group;
 };
 
 inline QuantizedGeometry quantized_geometry(QType qtype) {
     switch (qtype) {
+    case QType::Q3G128_F16S:
+        return {128, 48, 0};
     case QType::Q4G64_F16S:
-        return {64, 0};
+        return {64, 32, 0};
     case QType::Q5G64_F16S:
-        return {64, 8};
+        return {64, 32, 8};
     case QType::Q6G64_F16S:
-        return {64, 16};
+        return {64, 32, 16};
     case QType::W8G32_F16S:
-        return {32, 0};
+        return {32, 32, 0};
     default:
         throw std::invalid_argument("unsupported benchmark quantized format");
     }
@@ -100,8 +103,9 @@ inline PackedQuantizedWeight make_row_split_weight(QType qtype, std::int32_t n, 
     const std::uint64_t groups = detail::checked_mul(
         static_cast<std::uint64_t>(n), static_cast<std::uint64_t>(padded_k / geometry.group_size),
         "benchmark weight group count overflow");
-    const std::uint64_t low_bytes =
-        detail::checked_mul(groups, 32, "benchmark low plane size overflow");
+    const std::uint64_t low_bytes = detail::checked_mul(
+        groups, static_cast<std::uint64_t>(geometry.low_bytes_per_group),
+        "benchmark low plane size overflow");
     const std::uint64_t high_bytes =
         detail::checked_mul(groups, static_cast<std::uint64_t>(geometry.high_bytes_per_group),
                             "benchmark high plane size overflow");

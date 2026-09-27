@@ -213,6 +213,13 @@ quantized_weight::PackedWeight make_q4g64_f16s_weight(std::int32_t n, std::int32
                                                     quantized_weight::RowSplitCodePattern::Hashed});
 }
 
+quantized_weight::PackedWeight make_q3g128_f16s_weight(std::int32_t n, std::int32_t k,
+                                                      std::uint32_t seed) {
+    return quantized_weight::make_patterned_weight(QType::Q3G128_F16S, n, k, seed,
+                                                   {quantized_weight::RowSplitScalePattern::Small,
+                                                    quantized_weight::RowSplitCodePattern::Hashed});
+}
+
 quantized_weight::PackedWeight make_q5g64_f16s_weight(std::int32_t n, std::int32_t k,
                                                       std::uint32_t seed) {
     return quantized_weight::make_patterned_weight(QType::Q5G64_F16S, n, k, seed,

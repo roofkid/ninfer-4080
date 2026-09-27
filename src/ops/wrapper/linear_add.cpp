@@ -1,5 +1,7 @@
 #include "ninfer/ops/linear_add.h"
 
+#include "ninfer/ops/residual_add.h"
+
 #include "ops/linear_add/bf16/bf16_linear_add_plan.h"
 #include "ops/linear/fp8/fp8_config.h"
 #include "ops/linear/fp8/fp8_format.h"
@@ -31,6 +33,14 @@ void require_q5(const Weight& w) {
         w.padded_shape[0] != w.n || w.padded_shape[1] != w.k || w.qdata == nullptr ||
         w.qhigh == nullptr || w.scales == nullptr) {
         throw std::invalid_argument("linear_add: weight must be Q5G64_F16S row-split");
+    }
+}
+void require_q3(const Weight& w) {
+    if (w.qtype != QType::Q3G128_F16S || w.layout != QuantLayout::RowSplit ||
+        w.scale_dtype != DType::FP16 || w.group_size != 128 || w.group != 128 ||
+        w.padded_shape[0] != w.n || w.padded_shape[1] != w.k || w.qdata == nullptr ||
+        w.qhigh != nullptr || w.scales == nullptr) {
+        throw std::invalid_argument("linear_add: weight must be Q3G128_F16S row-split");
     }
 }
 
@@ -108,6 +118,18 @@ std::size_t linear_add_workspace_capacity_bytes(QType qtype, std::int32_t output
         return detail::q5_linear_add_capacity_workspace_bytes(output_rows, input_rows, input_rows,
                                                               min_tokens, max_tokens);
     }
+    if (qtype == QType::Q3G128_F16S) {
+        if (policy != LinearPolicy::A16Only) {
+            throw std::invalid_argument("linear_add workspace: Q3 admits only A16");
+        }
+        const bool supported_shape =
+            output_rows == 5120 && (input_rows == 17408 || input_rows == 6144);
+        if (!supported_shape) {
+            throw std::invalid_argument("linear_add workspace: unsupported Q3 profile");
+        }
+        return static_cast<std::size_t>(output_rows) *
+               static_cast<std::size_t>(max_tokens) * sizeof(std::uint16_t);
+    }
     if (qtype == QType::NVFP4) {
         const bool supported = (output_rows == detail::Nvfp4Residual6144Geometry::kOutputRows &&
                                 input_rows == detail::Nvfp4Residual6144Geometry::kInputRows) ||
@@ -180,6 +202,25 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPo
                 "linear_add: Q5 requires 16-byte x/residual/code/high/scale alignment");
         }
         detail::q5_linear_add_dispatch(x, w, residual_out, ws, stream);
+        return;
+    }
+
+    if (w.qtype == QType::Q3G128_F16S) {
+        if (policy != LinearPolicy::A16Only) {
+            throw std::invalid_argument("Q3 linear_add admits only A16");
+        }
+        require_q3(w);
+        const bool supported_shape = w.n == 5120 && (w.k == 17408 || w.k == 6144);
+        if (!supported_shape) { throw std::invalid_argument("linear_add: unsupported Q3 shape"); }
+        if (!aligned_to(x.data, 16) || !aligned_to(residual_out.data, 16) ||
+            !aligned_to(w.qdata, 16) || !aligned_to(w.scales, 4)) {
+            throw std::invalid_argument(
+                "linear_add: Q3 requires 16-byte x/residual/code alignment");
+        }
+        auto scope    = ws.scope();
+        Tensor delta  = ws.alloc(DType::BF16, {w.n, t});
+        linear(x, w, delta, stream);
+        residual_add(delta, residual_out, stream);
         return;
     }
 

@@ -17,6 +17,8 @@ inline constexpr std::int32_t kEmbedGatherQ6Group          = 64;
 inline constexpr std::int32_t kEmbedGatherQ6NibbleBpr      = 32;
 inline constexpr std::int32_t kEmbedGatherQ6HighBpr        = 16;
 inline constexpr std::int32_t kEmbedGatherQ6GroupsPerBlock = 2;
+inline constexpr std::int32_t kEmbedGatherQ4Group          = 64;
+inline constexpr std::int32_t kEmbedGatherQ4Bpr            = 32;
 inline constexpr std::int32_t kEmbedGatherW8Group          = 32;
 inline constexpr std::int32_t kEmbedGatherW8D              = 2048;
 inline constexpr std::int32_t kEmbedGatherW8Groups         = kEmbedGatherW8D / kEmbedGatherW8Group;
@@ -99,6 +101,36 @@ __global__ void embed_gather_q6_kernel(const std::int32_t* ids, const std::uint8
         const float scale = __half2float(__ushort_as_half(scale_bits));
         const int code    = unpack_q6_code(codes + group_index * kEmbedGatherQ6NibbleBpr,
                                            high + group_index * kEmbedGatherQ6HighBpr, lane);
+        out[i]            = __float2bfloat16(static_cast<float>(code) * scale);
+    }
+}
+
+__device__ __forceinline__ int unpack_q4_code(const std::uint8_t* codes, int index) {
+    const std::uint32_t packed = codes[index >> 1];
+    const std::uint32_t u      = (index & 1) ? (packed >> 4) : (packed & 0x0fu);
+    return (u & 0x8u) ? static_cast<int>(u) - 16 : static_cast<int>(u);
+}
+
+__global__ void embed_gather_q4_kernel(const std::int32_t* ids, const std::uint8_t* codes,
+                                       const std::uint8_t* scales, __nv_bfloat16* out,
+                                       std::int32_t d, std::int32_t T, std::int32_t padded_d) {
+    const std::int32_t kg     = padded_d / kEmbedGatherQ4Group;
+    const std::int64_t n      = static_cast<std::int64_t>(d) * T;
+    const std::int64_t start  = blockIdx.x * static_cast<std::int64_t>(blockDim.x) + threadIdx.x;
+    const std::int64_t stride = static_cast<std::int64_t>(gridDim.x) * blockDim.x;
+    for (std::int64_t i = start; i < n; i += stride) {
+        const std::int32_t t    = static_cast<std::int32_t>(i / d);
+        const std::int32_t k    = static_cast<std::int32_t>(i - static_cast<std::int64_t>(t) * d);
+        const std::int32_t row  = ids[t];
+        const std::int32_t g    = k / kEmbedGatherQ4Group;
+        const std::int32_t lane = k - g * kEmbedGatherQ4Group;
+        const std::int64_t group_index = static_cast<std::int64_t>(row) * kg + g;
+        const std::uint16_t scale_bits =
+            static_cast<std::uint16_t>(scales[group_index * 2]) |
+            static_cast<std::uint16_t>(static_cast<std::uint16_t>(scales[group_index * 2 + 1])
+                                       << 8);
+        const float scale = __half2float(__ushort_as_half(scale_bits));
+        const int code    = unpack_q4_code(codes + group_index * kEmbedGatherQ4Bpr, lane);
         out[i]            = __float2bfloat16(static_cast<float>(code) * scale);
     }
 }

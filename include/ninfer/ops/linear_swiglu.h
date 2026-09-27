@@ -44,7 +44,9 @@ linear_swiglu_workspace_capacity_bytes(QType qtype, std::int32_t gate_up_rows,
  *
  * Logical shapes / supported domain:
  *   T may be any positive value. The registered profiles are:
+ *   T may be any positive value. The registered profiles are:
  *   - Q4G64_F16S weight [34816,5120], x [5120,T], out [17408,T];
+ *   - Q3G128_F16S weight [34816,5120], x [5120,T], out [17408,T];
  *   - W8G32_F16S weight [12288,2048], x [2048,T], out [6144,T];
  *   - W8G32_F16S weight [34816,5120], x [5120,T], out [17408,T];
  *   - NVFP4 BlockScaleK16M128x4 weight [34816,5120], x [5120,T], out [17408,T];
@@ -66,7 +68,8 @@ linear_swiglu_workspace_capacity_bytes(QType qtype, std::int32_t gate_up_rows,
  *
  * Workspace:
  *   Caller-owned transient storage reported by linear_swiglu_workspace_capacity_bytes(),
- *   scoped to the call. W8, NVFP4 A16, and row-scaled FP8 A16 require zero bytes; A4/A8 routes use
+ *   scoped to the call. Q4/W8, NVFP4 A16, and row-scaled FP8 A16 require zero bytes; the Q3 route
+ *   accumulates both halves in FP32 through a column-chunked plane, and A4/A8 routes use
  *   caller-owned activation storage and may use private projection storage. There is no persistent
  *   state side effect.
  */

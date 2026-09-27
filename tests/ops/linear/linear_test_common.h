@@ -45,6 +45,8 @@ struct ShapeCase {
 using WeightGenerator = quantized_weight::PackedWeight (*)(std::int32_t, std::int32_t,
                                                            std::uint32_t);
 
+quantized_weight::PackedWeight make_q3g128_f16s_weight(std::int32_t n, std::int32_t k,
+                                                      std::uint32_t seed);
 quantized_weight::PackedWeight make_q4g64_f16s_weight(std::int32_t n, std::int32_t k,
                                                       std::uint32_t seed);
 quantized_weight::PackedWeight make_q5g64_f16s_weight(std::int32_t n, std::int32_t k,

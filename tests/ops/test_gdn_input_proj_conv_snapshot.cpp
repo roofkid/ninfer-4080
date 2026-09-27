@@ -558,6 +558,54 @@ int run_q4_q5() {
     return failures;
 }
 
+int run_q3() {
+    constexpr std::int32_t kHidden     = 5120;
+    constexpr std::int32_t kValueRows  = 6144;
+    constexpr std::int32_t kZRows      = 6144;
+    constexpr std::int32_t kChannels   = 10240;
+    DevicePackedWeight query_key(
+        quantized_weight::make_patterned_weight(QType::Q3G128_F16S, 4096, kHidden, 641U));
+    DevicePackedWeight value_z_weight(
+        quantized_weight::make_patterned_weight(QType::Q3G128_F16S, 12288, kHidden, 643U));
+    const std::vector<float> conv_weight = make_conv_weight(kChannels, 647U);
+    int failures = 0;
+    for (const auto [width, batch] : {std::pair{8, 1}, std::pair{4, 2}, std::pair{1, 4},
+                                      std::pair{1, 8}}) {
+        const std::size_t workspace_bytes =
+            ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
+                QType::Q3G128_F16S, 16384, kHidden, ops::LinearPolicy::A16Only, batch, width,
+                width);
+        failures += run_batched_case(
+            "Q3 A16 W=" + std::to_string(width) + " B=" + std::to_string(batch), kHidden,
+            kValueRows, kZRows, width, batch, {}, conv_weight, workspace_bytes,
+            kGdnInputProjConvSnapshotA16Tolerance,
+            [&](std::int32_t row, std::int32_t flat_column, const std::vector<float>& activation) {
+                const float* column =
+                    activation.data() + static_cast<std::size_t>(flat_column) * kHidden;
+                if (row < kQueryRows + kKeyRows) {
+                    return quantized_weight::dot_fp64(query_key.host, row, column, kHidden);
+                }
+                return quantized_weight::dot_fp64(value_z_weight.host,
+                                                  row - kQueryRows - kKeyRows, column, kHidden);
+            },
+            [&](std::int32_t row, std::int32_t flat_column, const std::vector<float>& activation) {
+                return quantized_weight::dot_fp64(
+                    value_z_weight.host, kValueRows + row,
+                    activation.data() + static_cast<std::size_t>(flat_column) * kHidden, kHidden);
+            },
+            [&](const Tensor& x, const Tensor& conv, Tensor& state, const Tensor& valid,
+                const Tensor& initial, const Tensor& snapshot_base, Tensor& q, Tensor& k,
+                Tensor& v, Tensor& z, WorkspaceArena& workspace) {
+                ops::gdn_input_proj_conv_snapshot(x, query_key.view(), value_z_weight.view(),
+                                                  conv, state, valid, initial, snapshot_base, q,
+                                                  k, v, z, workspace, nullptr);
+            });
+    }
+    failures += query_key.verify_preserved("Q3 snapshot query/key weight");
+    failures += value_z_weight.verify_preserved("Q3 snapshot value/z weight");
+    return failures;
+}
+
 int run_w8_case(DevicePackedWeight& parent, std::int32_t tokens, std::int32_t initial_slot) {
     constexpr std::int32_t kHidden           = 2048;
     constexpr std::int32_t kValueRows        = 4096;
@@ -1047,6 +1095,7 @@ int main() {
         ++failures;
     }
     failures += run_q4_q5();
+    failures += run_q3();
     failures += run_w8();
     failures += run_nvfp4();
     failures += run_fp8();

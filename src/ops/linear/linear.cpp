@@ -5,6 +5,7 @@
 #include "ops/linear/fp8/fp8_dispatch.h"
 #include "ops/linear/nvfp4/nvfp4_config.h"
 #include "ops/linear/nvfp4/nvfp4_dispatch.h"
+#include "ops/linear/q3/q3_dispatch.h"
 #include "ops/linear/q4/q4_dispatch.h"
 #include "ops/linear/q5/q5_dispatch.h"
 #include "ops/linear/q6/q6_dispatch.h"
@@ -78,6 +79,9 @@ void validate_linear_semantics(const Tensor& x, const Weight& w, const Tensor& o
 void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
                      WorkspaceArena* workspace, cudaStream_t stream) {
     switch (w.qtype) {
+    case QType::Q3G128_F16S:
+        detail::q3_dispatch(x, w, out, policy, stream);
+        return;
     case QType::Q4G64_F16S:
         detail::q4_dispatch(x, w, out, policy, stream);
         return;
@@ -120,6 +124,10 @@ std::size_t linear_workspace_capacity_bytes(QType qtype, std::int32_t output_row
     case QType::Q4G64_F16S:
         (void)detail::select_q4_launch(output_rows, input_rows, min_tokens, policy);
         (void)detail::select_q4_launch(output_rows, input_rows, max_tokens, policy);
+        return 0;
+    case QType::Q3G128_F16S:
+        (void)detail::select_q3_launch(output_rows, input_rows, min_tokens, policy);
+        (void)detail::select_q3_launch(output_rows, input_rows, max_tokens, policy);
         return 0;
     case QType::Q5G64_F16S:
         (void)detail::select_q5_launch(output_rows, input_rows, min_tokens, policy);

@@ -43,6 +43,14 @@ void gdn_input_proj(const Tensor& x, const Weight& qk_weight, const Weight& valu
                     Tensor& qkv, Tensor& z, cudaStream_t stream);
 
 /**
+ * Two-parent form with caller-owned transient storage. The Q3G128_F16S pair composes the
+ * [query,key] and [value,z] parents through one qualified projection buffer. A16 only.
+ */
+void gdn_input_proj(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
+                    Tensor& qkv, Tensor& z, LinearPolicy policy, WorkspaceArena& workspace,
+                    cudaStream_t stream);
+
+/**
  * Single-parent GDN projection. Registered parent forms are:
  *
  * - W8G32_F16S RowSplit [12288,2048], with stored row counts [2048,2048,4096,4096];

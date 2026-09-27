@@ -222,6 +222,8 @@ QType qtype_for(WeightFormat format) {
     switch (format) {
     case WeightFormat::BF16:
         return QType::BF16_CTRL;
+    case WeightFormat::Q3G128F16S:
+        return QType::Q3G128_F16S;
     case WeightFormat::Q5G64F16S:
         return QType::Q5G64_F16S;
     case WeightFormat::W8G32F16S:
@@ -235,8 +237,9 @@ HostWeight make_weight(WeightFormat format, const ShapeCase& shape) {
         return direct_bf16_weight::make_patterned(shape.n, shape.k, shape.seed);
     }
     const quantized_weight::PatternedWeightOptions options{
-        format == WeightFormat::Q5G64F16S ? quantized_weight::RowSplitScalePattern::Small
-                                          : quantized_weight::RowSplitScalePattern::Tiny,
+        format == WeightFormat::Q5G64F16S || format == WeightFormat::Q3G128F16S
+            ? quantized_weight::RowSplitScalePattern::Small
+            : quantized_weight::RowSplitScalePattern::Tiny,
         quantized_weight::RowSplitCodePattern::Hashed,
     };
     return quantized_weight::make_patterned_weight(qtype_for(format), shape.n, shape.k, shape.seed,

@@ -37,7 +37,8 @@ namespace ninfer::ops {
  *
  * Logical shapes:
  *   Contiguous BF16 x [K,T] and residual [N,T]. Registered weights are Q5G64_F16S RowSplit
- *   [5120,17408] or [5120,6144], W8G32_F16S RowSplit [2048,4096] or [2048,6144], NVFP4
+ *   [5120,17408] or [5120,6144], Q3G128_F16S RowSplit [5120,17408] or [5120,6144], W8G32_F16S
+ *   RowSplit [2048,4096] or [2048,6144], NVFP4
  *   BlockScaleK16M128x4 [5120,6144] or [5120,17408], row-scaled
  *   FP8_E4M3FN_ROW_BF16S [5120,6144] or [5120,17408], or BF16_CTRL Contiguous [5120,6144]. T may
  *   be any positive value.
@@ -52,7 +53,7 @@ namespace ninfer::ops {
  *   rounding boundaries.
  *
  * Compute policy:
- *   Q5, W8, and BF16_CTRL admit only A16Only. NVFP4 admits A16Only and AllowA4. Row-scaled FP8
+ *   Q5, Q3, W8, and BF16_CTRL admit only A16Only. NVFP4 admits A16Only and AllowA4. Row-scaled FP8
  *   admits A16Only and AllowA8. Each registration owns its production plan. A permissive policy
  *   allows the private resolver to select either qualified
  *   arithmetic profile; it does not itself prescribe a kernel.
@@ -62,7 +63,9 @@ namespace ninfer::ops {
  *
  * Workspace:
  *   Caller-owned transient storage reported by linear_add_workspace_capacity_bytes(), scoped to
- *   the call. A16 routes require no storage; quantized-activation routes use the reported capacity.
+ *   the call. A16 routes other than Q3 require no storage; the Q3 route materializes the bf16
+ *   projection before the residual update, and quantized-activation routes use the reported
+ *   capacity.
  *   There is no persistent state side effect.
  */
 void linear_add(const Tensor& x, const Weight& w, Tensor& residual, WorkspaceArena& ws,

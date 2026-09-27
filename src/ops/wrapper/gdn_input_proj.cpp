@@ -1,5 +1,6 @@
 #include "ninfer/ops/gdn_input_proj.h"
 
+#include "core/device.h"
 #include "core/layout.h"
 #include "ops/gdn_input_proj/fp8/fp8_gdn_conv_plan.h"
 #include "ops/gdn_input_proj/fp8/fp8_gdn_input_plan.h"
@@ -36,6 +37,28 @@ void require_matrix(const Tensor& tensor, std::int32_t rows, std::int32_t cols, 
     }
 }
 
+void require_q3_rowsplit(const Weight& weight, std::int32_t rows, const char* label) {
+    if (weight.qtype != QType::Q3G128_F16S || weight.layout != QuantLayout::RowSplit ||
+        weight.scale_dtype != DType::FP16 || weight.group_size != 128 || weight.group != 128 ||
+        weight.ndim != 2 || weight.n != rows || weight.k != 5120 || weight.shape[0] != rows ||
+        weight.shape[1] != 5120 || weight.padded_shape[0] != rows ||
+        weight.padded_shape[1] != 5120 || weight.qhigh != nullptr ||
+        weight.high_plane_bytes != 0 || !aligned_to(weight.qdata, 16) ||
+        !aligned_to(weight.scales, 4)) {
+        throw std::invalid_argument(std::string("gdn_input_proj: invalid ") + label);
+    }
+}
+
+// Column-major row-window copy for a [rows, columns] BF16 tensor.
+void copy_columns(const void* src, std::size_t src_pitch, std::size_t src_offset, void* dst,
+                  std::size_t dst_pitch, std::size_t dst_offset, std::size_t width_bytes,
+                  std::int32_t columns, cudaStream_t stream) {
+    CUDA_CHECK(cudaMemcpy2DAsync(static_cast<std::uint8_t*>(dst) + dst_offset, dst_pitch,
+                                 static_cast<const std::uint8_t*>(src) + src_offset, src_pitch,
+                                 width_bytes, static_cast<std::size_t>(columns),
+                                 cudaMemcpyDeviceToDevice, stream));
+}
+
 void require_conv_tensor(const Tensor& tensor, std::int32_t rows, std::int32_t width,
                          std::int32_t batch, const char* op, const char* label) {
     if (tensor.dtype != DType::BF16 || tensor.ne[0] != rows || tensor.ne[1] != width ||
@@ -55,6 +78,29 @@ void require_single_parent_nonoverlap(const Tensor& x, const Tensor& qkv, const 
     if (overlaps(x, qkv) || overlaps(x, z) || overlaps(qkv, z)) {
         throw std::invalid_argument("gdn_input_proj: x, qkv, and z must not overlap");
     }
+}
+
+// Composed two-parent Q3 projection: [query,key] then [value,z] through one qualified
+// projection buffer, publishing qkv [10240,T] and z [6144,T].
+void dispatch_q3_input_pair(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
+                            Tensor& qkv, Tensor& z, WorkspaceArena& ws, cudaStream_t stream) {
+    constexpr std::int32_t kQkRows    = 4096;
+    constexpr std::int32_t kValueRows = 6144;
+    constexpr std::int32_t kZRows     = 6144;
+    constexpr std::size_t kElem       = sizeof(std::uint16_t);
+    const std::int32_t columns        = x.ne[1];
+    auto scope                        = ws.scope();
+    Tensor qk                         = ws.alloc(DType::BF16, {kQkRows, columns});
+    linear(x, qk_weight, qk, stream);
+    copy_columns(qk.data, kQkRows * kElem, 0, qkv.data, (kQkRows + kValueRows) * kElem, 0,
+                 kQkRows * kElem, columns, stream);
+    Tensor vz = ws.alloc(DType::BF16, {kValueRows + kZRows, columns});
+    linear(x, value_z_weight, vz, stream);
+    copy_columns(vz.data, (kValueRows + kZRows) * kElem, 0, qkv.data,
+                 (kQkRows + kValueRows) * kElem, kQkRows * kElem, kValueRows * kElem, columns,
+                 stream);
+    copy_columns(vz.data, (kValueRows + kZRows) * kElem, kValueRows * kElem, z.data,
+                 kZRows * kElem, 0, kZRows * kElem, columns, stream);
 }
 
 struct ConvGeometry {
@@ -736,6 +782,34 @@ void gdn_input_proj(const Tensor& x, const Weight& qk_weight, const Weight& valu
     detail::q4_q5_gdn_input_dispatch(x, qk_weight, value_z_weight, qkv, z, stream);
 }
 
+void gdn_input_proj(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
+                    Tensor& qkv, Tensor& z, LinearPolicy policy, WorkspaceArena& workspace,
+                    cudaStream_t stream) {
+    constexpr std::int32_t kHidden     = 5120;
+    constexpr std::int32_t kQkRows     = 4096;
+    constexpr std::int32_t kValueRows  = 6144;
+    constexpr std::int32_t kZRows      = 6144;
+    constexpr std::int32_t kQkvRows    = kQkRows + kValueRows;
+    constexpr std::int32_t kParentRows = kValueRows + kZRows;
+    const std::int32_t cols            = x.ne[1];
+    if (cols <= 0) { throw std::invalid_argument("gdn_input_proj: T must be positive"); }
+    if (policy != LinearPolicy::A16Only) {
+        throw std::invalid_argument("gdn_input_proj: split pairs admit only A16");
+    }
+    require_matrix(x, kHidden, cols, "x");
+    require_matrix(qkv, kQkvRows, cols, "qkv");
+    require_matrix(z, kZRows, cols, "z");
+    if (qk_weight.qtype == QType::Q3G128_F16S || value_z_weight.qtype == QType::Q3G128_F16S) {
+        require_q3_rowsplit(qk_weight, kQkRows, "qk weight");
+        require_q3_rowsplit(value_z_weight, kParentRows, "value/z weight");
+        dispatch_q3_input_pair(x, qk_weight, value_z_weight, qkv, z, workspace, stream);
+        return;
+    }
+    require_rowsplit(qk_weight, QType::Q4G64_F16S, kQkRows, "qk weight");
+    require_rowsplit(value_z_weight, QType::Q5G64_F16S, kParentRows, "value/z weight");
+    detail::q4_q5_gdn_input_dispatch(x, qk_weight, value_z_weight, qkv, z, stream);
+}
+
 std::size_t gdn_input_proj_workspace_capacity_bytes(QType parent_qtype, std::int32_t parent_rows,
                                                     std::int32_t input_rows, LinearPolicy policy,
                                                     std::int32_t min_tokens,
@@ -768,7 +842,11 @@ std::size_t gdn_input_proj_workspace_capacity_bytes(QType parent_qtype, std::int
             {input_rows, 8192, 4096, parent_rows, input_rows, max_tokens});
         return 0;
     }
-    throw std::invalid_argument("gdn_input_proj workspace: unsupported parent profile");
+    if (parent_qtype == QType::Q3G128_F16S && parent_rows == 16384 && input_rows == 5120 &&
+        policy == LinearPolicy::A16Only) {
+        return static_cast<std::size_t>(4096 + 12288) *
+               static_cast<std::size_t>(max_tokens) * sizeof(std::uint16_t);
+    }
 }
 
 void gdn_input_proj(const Tensor& x, const Weight& query_key_value_z_weight, Tensor& qkv, Tensor& z,
@@ -835,6 +913,13 @@ std::size_t gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
         return detail::fp8_gdn_snapshot_workspace_capacity_bytes(policy, batch_size, min_width,
                                                                  max_width);
     }
+    if (parent_qtype == QType::Q3G128_F16S && parent_rows == 16384 && input_rows == 5120 &&
+        policy == LinearPolicy::A16Only) {
+        const std::int32_t aggregate       = batch_size * max_width;
+        const std::size_t projection_bytes = gdn_input_proj_workspace_capacity_bytes(
+            parent_qtype, parent_rows, input_rows, policy, batch_size * min_width, aggregate);
+        return composed_snapshot_capacity(10240, aggregate, projection_bytes);
+    }
     if (parent_qtype != QType::NVFP4 || parent_rows != detail::Nvfp4GdnInputGeometry::kOutputRows ||
         input_rows != detail::Nvfp4GdnInputGeometry::kInputRows) {
         throw std::invalid_argument(
@@ -885,6 +970,12 @@ std::size_t gdn_input_proj_conv_record_workspace_capacity_bytes(
         return detail::fp8_gdn_record_workspace_capacity_bytes(policy, batch_size, min_width,
                                                                max_width);
     }
+    if (parent_qtype == QType::Q3G128_F16S && parent_rows == 16384 && input_rows == 5120 &&
+        policy == LinearPolicy::A16Only) {
+        const std::int32_t aggregate = batch_size * max_width;
+        return gdn_input_proj_workspace_capacity_bytes(parent_qtype, parent_rows, input_rows,
+                                                       policy, batch_size * min_width, aggregate);
+    }
     if (parent_qtype != QType::NVFP4 || parent_rows != detail::Nvfp4GdnInputGeometry::kOutputRows ||
         input_rows != detail::Nvfp4GdnInputGeometry::kInputRows ||
         (policy != LinearPolicy::A16Only && policy != LinearPolicy::AllowA4)) {
@@ -922,8 +1013,6 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& qk_weight,
     constexpr std::int32_t kChannels   = kQueryRows + kKeyRows + kValueRows;
     constexpr std::int32_t kParentRows = kValueRows + kZRows;
     const ConvGeometry geometry        = require_snapshot_input(x, kHidden);
-    require_rowsplit(qk_weight, QType::Q4G64_F16S, kQueryRows + kKeyRows, "qk weight");
-    require_rowsplit(value_z_weight, QType::Q5G64_F16S, kParentRows, "value/z weight");
     require_snapshot_operands(conv_weight, conv_states, valid_columns, initial_state_slots,
                               snapshot_base_slots, kChannels, geometry);
     require_conv_tensor(query, kQueryRows, geometry.width, geometry.batch,
@@ -934,6 +1023,21 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& qk_weight,
                         "gdn_input_proj_conv_snapshot", "value");
     require_conv_tensor(z, kZRows, geometry.width, geometry.batch, "gdn_input_proj_conv_snapshot",
                         "z");
+
+    if (qk_weight.qtype == QType::Q3G128_F16S || value_z_weight.qtype == QType::Q3G128_F16S) {
+        require_q3_rowsplit(qk_weight, kQueryRows + kKeyRows, "qk weight");
+        require_q3_rowsplit(value_z_weight, kParentRows, "value/z weight");
+        compose_batched_snapshot(
+            x, conv_weight, conv_states, valid_columns, initial_state_slots, snapshot_base_slots,
+            query, key, value, z, kQueryRows, kKeyRows, kValueRows, geometry, ws, stream,
+            [&](const Tensor& x_flat, Tensor& projected, Tensor& z_flat) {
+                dispatch_q3_input_pair(x_flat, qk_weight, value_z_weight, projected, z_flat, ws,
+                                       stream);
+            });
+        return;
+    }
+    require_rowsplit(qk_weight, QType::Q4G64_F16S, kQueryRows + kKeyRows, "qk weight");
+    require_rowsplit(value_z_weight, QType::Q5G64_F16S, kParentRows, "value/z weight");
 
     if (geometry.batch > 1) {
         compose_batched_snapshot(
@@ -976,8 +1080,6 @@ void gdn_input_proj_conv_record(const Tensor& x, const Weight& qk_weight,
     constexpr std::int32_t kChannels   = kQueryRows + kKeyRows + kValueRows;
     constexpr std::int32_t kParentRows = kValueRows + kZRows;
     const ConvGeometry geometry        = require_record_input(x, kHidden);
-    require_rowsplit(qk_weight, QType::Q4G64_F16S, kQueryRows + kKeyRows, "qk weight");
-    require_rowsplit(value_z_weight, QType::Q5G64_F16S, kParentRows, "value/z weight");
     require_record_operands(conv_weight, conv_states, valid_columns, initial_state_slots, kChannels,
                             geometry);
     require_conv_tensor(conv_record, kChannels, geometry.width, geometry.batch,
@@ -990,6 +1092,22 @@ void gdn_input_proj_conv_record(const Tensor& x, const Weight& qk_weight,
                         "gdn_input_proj_conv_record", "value");
     require_conv_tensor(z, kZRows, geometry.width, geometry.batch, "gdn_input_proj_conv_record",
                         "z");
+    require_record_nonoverlap(x, conv_weight, conv_states, valid_columns, initial_state_slots,
+                              conv_record, query, key, value, z, workspace);
+
+    if (qk_weight.qtype == QType::Q3G128_F16S || value_z_weight.qtype == QType::Q3G128_F16S) {
+        require_q3_rowsplit(qk_weight, kQueryRows + kKeyRows, "qk weight");
+        require_q3_rowsplit(value_z_weight, kParentRows, "value/z weight");
+        compose_record(x, conv_weight, conv_states, valid_columns, initial_state_slots, conv_record,
+                       query, key, value, z, geometry, workspace, stream,
+                       [&](const Tensor& x_flat, Tensor& record_flat, Tensor& z_flat) {
+                           dispatch_q3_input_pair(x_flat, qk_weight, value_z_weight, record_flat,
+                                                  z_flat, workspace, stream);
+                       });
+        return;
+    }
+    require_rowsplit(qk_weight, QType::Q4G64_F16S, kQueryRows + kKeyRows, "qk weight");
+    require_rowsplit(value_z_weight, QType::Q5G64_F16S, kParentRows, "value/z weight");
     require_record_nonoverlap(x, conv_weight, conv_states, valid_columns, initial_state_slots,
                               conv_record, query, key, value, z, workspace);
 

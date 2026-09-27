@@ -9,7 +9,7 @@
 #include "ops/linear/fp8/fp8_format.h"
 #include "ops/linear/nvfp4/nvfp4_config.h"
 #include "ops/linear/nvfp4/nvfp4_format.h"
-
+#include "core/device.h"
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -57,6 +57,29 @@ void require_w8_rowsplit(const Weight& weight, std::int32_t rows, std::int32_t h
         !aligned_to(weight.scales, 16)) {
         throw std::invalid_argument(std::string("attn_input_proj: invalid ") + label);
     }
+}
+
+void require_q3_rowsplit(const Weight& weight, std::int32_t rows, const char* label) {
+    if (weight.qtype != QType::Q3G128_F16S || weight.layout != QuantLayout::RowSplit ||
+        weight.scale_dtype != DType::FP16 || weight.group_size != 128 || weight.group != 128 ||
+        weight.ndim != 2 || weight.n != rows || weight.k != 5120 || weight.shape[0] != rows ||
+        weight.shape[1] != 5120 || weight.padded_shape[0] != rows ||
+        weight.padded_shape[1] != 5120 || weight.qhigh != nullptr ||
+        weight.high_plane_bytes != 0 || !aligned_to(weight.qdata, 16) ||
+        !aligned_to(weight.scales, 4)) {
+        throw std::invalid_argument(std::string("attn_input_proj: invalid ") + label);
+    }
+}
+
+void copy_column_rows(const Tensor& src, std::int32_t src_begin, std::int32_t rows,
+                      Tensor& dst, cudaStream_t stream) {
+    CUDA_CHECK(cudaMemcpy2DAsync(
+        dst.data, static_cast<std::size_t>(rows) * sizeof(std::uint16_t),
+        static_cast<const std::uint8_t*>(src.data) +
+            static_cast<std::size_t>(src_begin) * sizeof(std::uint16_t),
+        static_cast<std::size_t>(src.ne[0]) * sizeof(std::uint16_t),
+        static_cast<std::size_t>(rows) * sizeof(std::uint16_t),
+        static_cast<std::size_t>(src.ne[1]), cudaMemcpyDeviceToDevice, stream));
 }
 
 void require_bf16_contiguous(const Weight& weight, std::int32_t rows, std::int32_t hidden,
@@ -210,6 +233,12 @@ std::size_t attn_input_proj_workspace_capacity_bytes(QType parent_qtype, std::in
         (void)detail::w8_attn_input_resolve_plan(
             {input_rows, 4096, 512, parent_rows, input_rows, max_tokens});
         return 0;
+    case QType::Q3G128_F16S:
+        if (parent_rows != 7168 || input_rows != 5120 || policy != LinearPolicy::A16Only) {
+            throw std::invalid_argument("attn_input_proj workspace: unsupported Q3 profile");
+        }
+        return static_cast<std::size_t>(7168) * static_cast<std::size_t>(max_tokens) *
+               sizeof(std::uint16_t);
     case QType::Q4G64_F16S:
     case QType::Q5G64_F16S:
     case QType::Q6G64_F16S:
@@ -270,6 +299,35 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_value_weight, Tens
     require_w8_rowsplit(query_key_value_weight, kRows, hidden, "query/key/value weight");
 
     detail::w8_attn_input_dispatch(x, query_key_value_weight, q, k, v, stream);
+}
+
+void attn_input_proj(const Tensor& x, const Weight& query_key_weight,
+                     const Weight& gate_value_weight, Tensor& q, Tensor& gate, Tensor& k,
+                     Tensor& v, LinearPolicy policy, WorkspaceArena& workspace,
+                     cudaStream_t stream) {
+    validate_policy(policy);
+    constexpr std::int32_t kHidden = 5120;
+    constexpr std::int32_t kQRows  = 6144;
+    constexpr std::int32_t kKvRows = 1024;
+    const std::int32_t cols        = x.ne[1];
+    if (policy != LinearPolicy::A16Only) {
+        throw std::invalid_argument("attn_input_proj: split pairs admit only A16");
+    }
+    require_matrix(x, kHidden, cols, "x");
+    require_matrix(q, kQRows, cols, "q");
+    require_matrix(gate, kQRows, cols, "gate");
+    require_matrix(k, kKvRows, cols, "k");
+    require_matrix(v, kKvRows, cols, "v");
+    require_q3_rowsplit(query_key_weight, kQRows + kKvRows, "query/key weight");
+    require_q3_rowsplit(gate_value_weight, kQRows + kKvRows, "gate/value weight");
+    auto scope       = workspace.scope();
+    Tensor projected = workspace.alloc(DType::BF16, {kQRows + kKvRows, cols});
+    linear(x, query_key_weight, projected, stream);
+    copy_column_rows(projected, 0, kQRows, q, stream);
+    copy_column_rows(projected, kQRows, kKvRows, k, stream);
+    linear(x, gate_value_weight, projected, stream);
+    copy_column_rows(projected, 0, kQRows, gate, stream);
+    copy_column_rows(projected, kQRows, kKvRows, v, stream);
 }
 
 } // namespace ninfer::ops

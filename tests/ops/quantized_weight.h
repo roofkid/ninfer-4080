@@ -150,6 +150,8 @@ struct QuantSpec {
 
 inline QuantSpec quant_spec(QType qtype) {
     switch (qtype) {
+    case QType::Q3G128_F16S:
+        return {3, 128, 3, -4};
     case QType::Q4G64_F16S:
         return {4, 64, 7, -8};
     case QType::Q5G64_F16S:
@@ -164,7 +166,9 @@ inline QuantSpec quant_spec(QType qtype) {
 }
 
 inline int nibble_bytes_per_group(const QuantSpec& spec) {
-    return spec.bits == 8 ? spec.group_size : spec.group_size / 2;
+    return spec.bits == 8 ? spec.group_size
+           : spec.bits == 3 ? spec.group_size * 3 / 8
+                            : spec.group_size / 2;
 }
 
 inline int high_bytes_per_group(const QuantSpec& spec) {
@@ -175,6 +179,20 @@ inline int high_bytes_per_group(const QuantSpec& spec) {
 inline void pack_lowbit_group(const std::int8_t* codes, const QuantSpec& spec,
                               std::uint8_t* nibble_out, std::uint8_t* high_out) {
     const int nib  = nibble_bytes_per_group(spec);
+    if (spec.bits == 3) {
+        std::fill(nibble_out, nibble_out + nib, static_cast<std::uint8_t>(0));
+        (void)high_out;
+        for (int i = 0; i < spec.group_size; ++i) {
+            const std::uint32_t u = static_cast<std::uint32_t>(codes[i]) & 0x7u;
+            for (int bit = 0; bit < 3; ++bit) {
+                if ((u >> bit) & 1u) {
+                    const int pos = i * 3 + bit;
+                    nibble_out[pos >> 3] |= static_cast<std::uint8_t>(1u << (pos & 7));
+                }
+            }
+        }
+        return;
+    }
     const int high = high_bytes_per_group(spec);
     std::fill(nibble_out, nibble_out + nib, static_cast<std::uint8_t>(0));
     if (high != 0) { std::fill(high_out, high_out + high, static_cast<std::uint8_t>(0)); }
@@ -208,6 +226,17 @@ inline void pack_lowbit_group(const std::int8_t* codes, const QuantSpec& spec,
 inline int unpack_lowbit_code(const std::uint8_t* nibble, const std::uint8_t* high,
                               const QuantSpec& spec, int index) {
     if (spec.bits == 8) { return static_cast<std::int8_t>(nibble[index]); }
+    if (spec.bits == 3) {
+        const int bit   = index * 3;
+        const int byte  = bit >> 3;
+        const int shift = bit & 7;
+        std::uint32_t bits = static_cast<std::uint32_t>(nibble[byte]) >> shift;
+        if (shift > 5) {
+            bits |= static_cast<std::uint32_t>(nibble[byte + 1]) << (8 - shift);
+        }
+        const std::uint32_t u = bits & 0x7u;
+        return static_cast<int>(u) - ((u & 0x4u) != 0 ? 8 : 0);
+    }
     const std::uint8_t low_byte = nibble[index >> 1];
     const std::uint32_t low     = (index & 1) ? (low_byte >> 4) : (low_byte & 0x0fu);
     std::uint32_t hi            = 0;
@@ -533,7 +562,7 @@ inline PackedWeight make_patterned_weight(QType qtype, std::int32_t n, std::int3
             }
         }
     } else {
-        std::uint8_t code_patterns[256][32]{};
+        std::uint8_t code_patterns[256][64]{};
         std::uint8_t high_patterns[256][16]{};
         for (std::size_t pattern = 0; pattern < 256; ++pattern) {
             std::uint64_t state = detail::mix64(static_cast<std::uint64_t>(seed) << 32 | pattern);
@@ -565,7 +594,7 @@ inline PackedWeight make_patterned_weight(QType qtype, std::int32_t n, std::int3
     }
     const std::int32_t partial_group_lanes = k % spec.group_size;
     if (partial_group_lanes != 0) {
-        std::int8_t codes[64]{};
+        std::int8_t codes[128]{};
         const std::int32_t group = logical_groups - 1;
         for (std::int32_t row = 0; row < n; ++row) {
             const std::size_t group_index = static_cast<std::size_t>(row) * kg + group;
@@ -805,8 +834,8 @@ inline PackedWeight pack_row_split_lowbit(const std::vector<float>& source, std:
     out.scale_plane_bytes = static_cast<std::uint64_t>(n) * static_cast<std::uint64_t>(kg) * 2ULL;
     out.payload.assign(static_cast<std::size_t>(out.scale_plane_offset + out.scale_plane_bytes), 0);
 
-    std::int8_t codes[64];
-    float vals[64];
+    std::int8_t codes[128];
+    float vals[128];
     for (std::int32_t row = 0; row < n; ++row) {
         for (std::int32_t g = 0; g < kg; ++g) {
             float maxabs = 0.0f;
@@ -882,6 +911,11 @@ inline PackedWeight pack_q6_row_split(const std::vector<float>& source, std::int
 inline PackedWeight pack_w8g32_row_split(const std::vector<float>& source, std::int32_t n,
                                          std::int32_t k) {
     return pack_row_split_lowbit(source, n, k, QType::W8G32_F16S);
+}
+
+inline PackedWeight pack_q3g128_row_split(const std::vector<float>& source, std::int32_t n,
+                                         std::int32_t k) {
+    return pack_row_split_lowbit(source, n, k, QType::Q3G128_F16S);
 }
 
 } // namespace ninfer::test::quantized_weight

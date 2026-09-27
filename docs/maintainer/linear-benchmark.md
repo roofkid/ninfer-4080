@@ -201,6 +201,16 @@ activation/output。不同 T 复用同一组 allocation，不重复构造大权�
 | `27b.mtp_gate_up` | W8 | `(34816,5120)` | Continuous | MTP gate/up |
 | `27b.mtp_down` | W8 | `(5120,17408)` | Continuous | MTP down |
 
+Q3 3-bit GSQ artifact 的五个 parent 几何（`qwen3_8_27b_gsq3.ninfer` 的权重集）：
+
+| Label | QType | `(N,K)` | T class | 实际角色 |
+|---|---|---:|---|---|
+| `27b.gsq3_attention_qkv` | Q3 | `(14336,5120)` | Continuous | full-attention Q/K/gate/V |
+| `27b.gsq3_gdn_qkvz` | Q3 | `(16384,5120)` | Continuous | GDN Q/K/V/Z |
+| `27b.gsq3_attention_output` | Q3 | `(5120,6144)` | Continuous | attention output |
+| `27b.gsq3_gate_up` | Q3 | `(34816,5120)` | Continuous | Text gate/up |
+| `27b.gsq3_down` | Q3 | `(5120,17408)` | Continuous | Text down |
+
 27B Vision suite 登记实际由 public Linear 调用的七个几何：
 
 | Label | QType | `(N,K)` | T class | 实际角色 |

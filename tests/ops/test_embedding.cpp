@@ -325,6 +325,125 @@ private:
     std::vector<Q6Row> rows_;
 };
 
+struct Q4Row {
+    std::int32_t id;
+    std::vector<std::uint8_t> codes;
+    std::vector<std::uint8_t> scales;
+};
+
+class Q4Table {
+public:
+    explicit Q4Table(std::int32_t d = kQ6D)
+        : d_(d), groups_(d / 64),
+          code_plane_bytes_(static_cast<std::size_t>(kVocab) * groups_ * 32),
+          scale_offset_(align_up(code_plane_bytes_, 256)),
+          payload_(scale_offset_ + static_cast<std::size_t>(kVocab) * groups_ * 2) {
+        for (const std::int32_t row : repeated_ids(8)) {
+            if (find(row) == nullptr) add_row(row);
+        }
+    }
+
+    Weight weight() {
+        auto* base = static_cast<std::uint8_t*>(payload_.data());
+        Weight result{};
+        result.qtype            = QType::Q4G64_F16S;
+        result.layout           = QuantLayout::RowSplit;
+        result.scale_dtype      = DType::FP16;
+        result.payload          = base;
+        result.payload_bytes    = payload_.bytes();
+        result.qdata            = base;
+        result.qhigh            = nullptr;
+        result.scales           = base + scale_offset_;
+        result.high_plane_bytes = 0;
+        result.group_size       = 64;
+        result.group            = 64;
+        result.ndim             = 2;
+        result.shape[0]         = kVocab;
+        result.shape[1]         = d_;
+        result.padded_shape[0]  = kVocab;
+        result.padded_shape[1]  = d_;
+        result.n                = kVocab;
+        result.k                = d_;
+        return result;
+    }
+
+    std::vector<double> oracle(const std::vector<std::int32_t>& ids) const {
+        std::vector<double> result(static_cast<std::size_t>(d_) * ids.size());
+        for (std::size_t t = 0; t < ids.size(); ++t) {
+            const Q4Row* row = find(ids[t]);
+            if (row == nullptr) throw std::out_of_range("Q4 oracle row was not materialized");
+            for (std::int32_t d = 0; d < d_; ++d) {
+                const std::int32_t group = d / 64;
+                const std::int32_t lane  = d % 64;
+                const std::uint32_t encoded =
+                    (row->codes[static_cast<std::size_t>(group) * 32 + lane / 2] >>
+                     ((lane & 1) * 4)) &
+                    0x0fu;
+                const int code = (encoded & 0x8u) != 0 ? static_cast<int>(encoded) - 16
+                                                       : static_cast<int>(encoded);
+                const double scale =
+                    static_cast<double>(f16_to_f32(load_u16_le(row->scales, group * 2)));
+                result[t * static_cast<std::size_t>(d_) + d] = static_cast<double>(code) * scale;
+            }
+        }
+        return result;
+    }
+
+    int verify_unchanged(const char* label) const {
+        int failures = payload_.verify_guards(label);
+        for (const Q4Row& row : rows_) {
+            std::vector<std::uint8_t> got(row.codes.size());
+            payload_.copy_to_host(got.data(), got.size(),
+                                  static_cast<std::size_t>(row.id) * groups_ * 32);
+            failures += verify_exact(label, got, row.codes);
+            got.resize(row.scales.size());
+            payload_.copy_to_host(got.data(), got.size(),
+                                  scale_offset_ + static_cast<std::size_t>(row.id) * groups_ * 2);
+            failures += verify_exact(label, got, row.scales);
+        }
+        return failures;
+    }
+
+private:
+    const Q4Row* find(std::int32_t id) const {
+        const auto it = std::find_if(rows_.begin(), rows_.end(),
+                                     [id](const Q4Row& row) { return row.id == id; });
+        return it == rows_.end() ? nullptr : &*it;
+    }
+
+    void add_row(std::int32_t id) {
+        Q4Row row{id, std::vector<std::uint8_t>(static_cast<std::size_t>(groups_) * 32),
+                  std::vector<std::uint8_t>(static_cast<std::size_t>(groups_) * 2)};
+        for (std::int32_t group = 0; group < groups_; ++group) {
+            const std::uint16_t scale =
+                f32_to_f16(0.0013f + 0.00037f * static_cast<float>((id + group * 3) % 11));
+            store_u16_le(row.scales, static_cast<std::size_t>(group) * 2, scale);
+            for (std::int32_t lane = 0; lane < 64; ++lane) {
+                int code = ((id % 29 + group * 17 + lane * 11) & 15) - 8;
+                if (lane == 0) code = -8;
+                if (lane == 1) code = 7;
+                if (lane == 2) code = 0;
+                const std::uint32_t encoded =
+                    static_cast<std::uint32_t>(static_cast<std::uint8_t>(code)) & 0x0fu;
+                row.codes[static_cast<std::size_t>(group) * 32 + lane / 2] |=
+                    static_cast<std::uint8_t>(encoded << ((lane & 1) * 4));
+            }
+        }
+        payload_.copy_from_host(row.codes.data(), row.codes.size(),
+                                static_cast<std::size_t>(id) * groups_ * 32);
+        payload_.copy_from_host(row.scales.data(), row.scales.size(),
+                                scale_offset_ + static_cast<std::size_t>(id) * groups_ * 2);
+        rows_.push_back(std::move(row));
+    }
+
+    std::int32_t d_;
+    std::int32_t groups_;
+    std::size_t code_plane_bytes_;
+    std::size_t scale_offset_;
+    GuardedDeviceBuffer payload_;
+    std::vector<Q4Row> rows_;
+};
+
 struct W8Row {
     std::int32_t id;
     std::vector<std::uint8_t> codes;
@@ -622,6 +741,19 @@ int test_q6() {
     return failures;
 }
 
+int test_q4() {
+    Q4Table table;
+    int failures = 0;
+    failures += run_quantized_case("embedding Q4 [248320,5120] T=1", table, repeated_ids(1),
+                                   kQ6D);
+    failures += run_quantized_case("embedding Q4 [248320,5120] T=7", table, repeated_ids(7),
+                                   kQ6D);
+    failures += run_quantized_case("embedding Q4 [248320,5120] T=128", table, repeated_ids(128),
+                                   kQ6D);
+    failures += table.verify_unchanged("embedding Q4 table");
+    return failures;
+}
+
 int test_w8() {
     int failures = 0;
     for (const std::int32_t d : {kW8VisionD, kW8TextD}) {
@@ -723,6 +855,7 @@ int main() {
     try {
         failures += test_dense();
         failures += test_q6();
+        failures += test_q4();
         failures += test_w8();
         failures += test_fp8();
     } catch (const std::exception& error) {

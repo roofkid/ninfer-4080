@@ -50,7 +50,8 @@ int verify_output(std::string_view label, const GuardedBf16Tensor& output,
 }
 
 int run_target_projection_case(DevicePackedWeight& parent, DevicePackedWeight* gate_value,
-                               int tokens, ops::LinearPolicy policy, bool replay = false) {
+                               int tokens, ops::LinearPolicy policy, bool replay = false,
+                               bool q3 = false) {
     constexpr int hidden = 5120, qrows = 6144, kvrows = 1024;
     const bool dual      = gate_value != nullptr;
     auto activation      = make_bf16_activation(hidden, tokens, 101U + tokens);
@@ -61,14 +62,20 @@ int run_target_projection_case(DevicePackedWeight& parent, DevicePackedWeight* g
     Tensor x(input.p, DType::BF16, {hidden, tokens}), q = query.tensor(), g = gate.tensor(),
                                                       k = key.tensor(), v = value.tensor();
     const auto capacity =
-        dual ? 0
-             : ops::attn_input_proj_workspace_capacity_bytes(QType::FP8_E4M3FN_ROW_BF16S, 14336,
-                                                             hidden, policy, tokens, tokens);
+        q3 ? ops::attn_input_proj_workspace_capacity_bytes(QType::Q3G128_F16S, 7168, hidden,
+                                                           policy, tokens, tokens)
+        : dual ? 0
+               : ops::attn_input_proj_workspace_capacity_bytes(QType::FP8_E4M3FN_ROW_BF16S,
+                                                               14336, hidden, policy, tokens,
+                                                               tokens);
     GuardedDeviceBuffer scratch(std::max<std::size_t>(capacity, 1));
     DeviceArena workspace(DeviceSpan{scratch.data(), std::max<std::size_t>(capacity, 1)});
     DeviceContext device;
     const auto launch = [&] {
-        if (dual)
+        if (q3)
+            ops::attn_input_proj(x, parent.view(), gate_value->view(), q, g, k, v,
+                                 ops::LinearPolicy::A16Only, workspace, device.stream);
+        else if (dual)
             ops::attn_input_proj(x, parent.view(), gate_value->view(), q, g, k, v, device.stream);
         else if (policy == ops::LinearPolicy::A16Only && (tokens % 2))
             ops::attn_input_proj(x, parent.view(), q, g, k, v, device.stream);
@@ -104,8 +111,7 @@ int run_target_projection_case(DevicePackedWeight& parent, DevicePackedWeight* g
                                    : a8 ? kAttnInputProjA8Tolerance
                                         : kFp8AttnInputProjA16Tolerance;
         const int sample_count   = (a8 || replay) ? 31 : 7;
-        const std::string suffix = std::string(dual ? " Q4/Q5" : " FP8") +
-                                   (a8 ? " allow-a8" : " a16") + " T=" + std::to_string(tokens) +
+        const std::string suffix = std::string(q3 ? " Q3" : dual ? " Q4/Q5" : " FP8") +
                                    " phase=" + std::to_string(phase);
         failures += verify_output("attn q" + suffix, query, parent.host, 0, qrows, activation,
                                   hidden, tokens, criterion, sample_count);
@@ -147,6 +153,23 @@ int run_q4_q5() {
     for (int t : {1, 8, 12, 13, 16, 32, 63, 64, 65, 96, 104, 105, 127, 128, 129, 192, 193})
         failures +=
             run_target_projection_case(query_key, &gate_value, t, ops::LinearPolicy::A16Only, true);
+    return failures;
+}
+
+int run_q3() {
+    constexpr std::int32_t kHidden = 5120;
+    constexpr std::int32_t kParent = 7168;
+    DevicePackedWeight query_key(
+        quantized_weight::make_patterned_weight(QType::Q3G128_F16S, kParent, kHidden, 109U));
+    DevicePackedWeight gate_value(
+        quantized_weight::make_patterned_weight(QType::Q3G128_F16S, kParent, kHidden, 113U));
+    int failures = 0;
+    for (const int t : {1, 2, 4, 8, 9, 16, 33, 64, 65, 128, 129, 256, 513})
+        failures += run_target_projection_case(query_key, &gate_value, t,
+                                               ops::LinearPolicy::A16Only, false, true);
+    for (const int t : {1, 9, 65, 128})
+        failures += run_target_projection_case(query_key, &gate_value, t,
+                                               ops::LinearPolicy::A16Only, true, true);
     return failures;
 }
 
@@ -538,6 +561,7 @@ int main(int argc, char** argv) {
     int failures = 0;
     if (!dflash2_only) {
         failures += run_q4_q5();
+        failures += run_q3();
         failures += run_bf16_target();
         failures += run_nvfp4_target();
         failures += run_fp8_target();

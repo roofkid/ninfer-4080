@@ -290,6 +290,55 @@ int run_q4_q5() {
     return failures;
 }
 
+int run_q3() {
+    constexpr std::int32_t kHidden    = 5120;
+    constexpr std::int32_t kValueRows = 6144;
+    constexpr std::int32_t kZRows     = 6144;
+    DevicePackedWeight qk(
+        quantized_weight::make_patterned_weight(QType::Q3G128_F16S, 4096, kHidden, 1541U));
+    DevicePackedWeight value_z(
+        quantized_weight::make_patterned_weight(QType::Q3G128_F16S, 12288, kHidden, 1543U));
+
+    int failures   = 0;
+    const auto run = [&](std::int32_t width, std::int32_t batch, std::vector<std::int32_t> valid,
+                         std::uint32_t seed) {
+        const std::size_t snapshot_bytes =
+            ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
+                QType::Q3G128_F16S, 16384, kHidden, ops::LinearPolicy::A16Only, batch, width,
+                width);
+        const std::size_t record_bytes =
+            ops::gdn_input_proj_conv_record_workspace_capacity_bytes(
+                QType::Q3G128_F16S, 16384, kHidden, ops::LinearPolicy::A16Only, batch, width,
+                width);
+        return run_case(
+            "Q3 B=" + std::to_string(batch) + " T=" + std::to_string(width), kHidden,
+            kValueRows, kZRows, width, batch, std::move(valid), snapshot_bytes, record_bytes,
+            [&](const Tensor& x, const Tensor& conv, Tensor& state, const Tensor& valid_columns,
+                const Tensor& initial, const Tensor& snapshot_base, Tensor& q, Tensor& k,
+                Tensor& v, Tensor& z, WorkspaceArena& workspace, cudaStream_t stream) {
+                ops::gdn_input_proj_conv_snapshot(x, qk.view(), value_z.view(), conv, state,
+                                                  valid_columns, initial, snapshot_base, q, k,
+                                                  v, z, workspace, stream);
+            },
+            [&](const Tensor& x, const Tensor& conv, const Tensor& state,
+                const Tensor& valid_columns, const Tensor& initial, Tensor& record, Tensor& q,
+                Tensor& k, Tensor& v, Tensor& z, WorkspaceArena& workspace,
+                cudaStream_t stream) {
+                ops::gdn_input_proj_conv_record(x, qk.view(), value_z.view(), conv, state,
+                                                valid_columns, initial, record, q, k, v, z,
+                                                workspace, stream);
+            },
+            seed);
+    };
+    failures += run(2, 1, {}, 1551U);
+    failures += run(16, 1, {}, 1561U);
+    failures += run(16, 8, {16, 13, 9, 7, 5, 3, 2, 1}, 1571U);
+    failures += run(5, 3, {5, 3, 1}, 1581U);
+    failures += qk.verify_preserved("Q3 record qk weight");
+    failures += value_z.verify_preserved("Q3 record value/z weight");
+    return failures;
+}
+
 int run_w8() {
     constexpr std::int32_t kHidden    = 2048;
     constexpr std::int32_t kValueRows = 4096;
@@ -435,6 +484,7 @@ int main() {
 
     int failures = 0;
     failures += run_q4_q5();
+    failures += run_q3();
     failures += run_w8();
     failures += run_nvfp4();
     failures += run_fp8();

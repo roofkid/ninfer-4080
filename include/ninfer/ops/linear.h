@@ -55,16 +55,19 @@ enum class LinearPolicy : std::uint8_t {
  * no bias, activation, residual addition, or transpose mode.
  *
  * @par Supported execution domain
- * Registered execution uses RowSplit Q4G64_F16S, Q5G64_F16S, Q6G64_F16S, or W8G32_F16S weights
+ * Registered execution uses RowSplit Q3G128_F16S, Q4G64_F16S, Q5G64_F16S, Q6G64_F16S, or W8G32_F16S
+ * weights
  * with FP16 scales, block-scaled NVFP4 weights, row-scaled FP8_E4M3FN_ROW_BF16S weights, plus
  * registered contiguous BF16_CTRL problems. Each format owns a finite registry of exact physical
  * weight problems and selects its kernel internally; a valid encoding and alignment do not imply
  * arbitrary N/K support. FP8 currently registers `[N,K]` in `{[14336,5120], [16384,5120],
  * [34816,5120], [248320,5120], [5120,6144], [5120,17408]}` at every positive T. The current NVFP4
  * problems register the five non-vocabulary FP8 geometries and accept every positive T. W8 also
- * registers `[5120,25600]` at every positive T. BF16_CTRL registers `[14336,5120]`,
- * `[5120,6144]`, and `[256,5120]` at every positive T. Text and MTP packed-weight problems accept
- * every positive column extent T. Registered Vision problems accept raw-patch P in
+ * problems register the five non-vocabulary FP8 geometries and accept every positive T. Q3G128_F16S
+ * registers `[N,K]` in `{[14336,5120], [16384,5120], [34816,5120], [5120,6144], [5120,17408]}`
+ * at every positive T. W8 also registers `[5120,25600]` at every positive T. BF16_CTRL registers
+ * `[14336,5120]`, `[5120,6144]`, and `[256,5120]` at every positive T. Text and MTP packed-weight
+ * problems accept every positive column extent T. Registered Vision problems accept raw-patch P in
  * `{4,8,...,131072}` or merged-token V in `[1,32768]`; a matrix column does not inherently
  * represent a text token. FP32_CTRL is unsupported.
  *
