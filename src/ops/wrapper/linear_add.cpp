@@ -119,16 +119,19 @@ std::size_t linear_add_workspace_capacity_bytes(QType qtype, std::int32_t output
                                                               min_tokens, max_tokens);
     }
     if (qtype == QType::Q3G128_F16S) {
-        if (policy != LinearPolicy::A16Only) {
-            throw std::invalid_argument("linear_add workspace: Q3 admits only A16");
+        if (policy != LinearPolicy::A16Only && policy != LinearPolicy::AllowA8) {
+            throw std::invalid_argument("linear_add workspace: Q3 admits only A16 or A8");
         }
         const bool supported_shape =
             output_rows == 5120 && (input_rows == 17408 || input_rows == 6144);
         if (!supported_shape) {
             throw std::invalid_argument("linear_add workspace: unsupported Q3 profile");
         }
-        return static_cast<std::size_t>(output_rows) *
-               static_cast<std::size_t>(max_tokens) * sizeof(std::uint16_t);
+        WorkspaceLayoutBuilder layout;
+        (void)layout.alloc(DType::BF16, {output_rows, max_tokens});
+        (void)layout.alloc_bytes(linear_workspace_capacity_bytes(qtype, output_rows, input_rows,
+                                                               policy, min_tokens, max_tokens));
+        return layout.peak_bytes(1);
     }
     if (qtype == QType::NVFP4) {
         const bool supported = (output_rows == detail::Nvfp4Residual6144Geometry::kOutputRows &&
@@ -206,8 +209,8 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPo
     }
 
     if (w.qtype == QType::Q3G128_F16S) {
-        if (policy != LinearPolicy::A16Only) {
-            throw std::invalid_argument("Q3 linear_add admits only A16");
+        if (policy != LinearPolicy::A16Only && policy != LinearPolicy::AllowA8) {
+            throw std::invalid_argument("Q3 linear_add admits only A16 or A8");
         }
         require_q3(w);
         const bool supported_shape = w.n == 5120 && (w.k == 17408 || w.k == 6144);
@@ -219,7 +222,7 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPo
         }
         auto scope    = ws.scope();
         Tensor delta  = ws.alloc(DType::BF16, {w.n, t});
-        linear(x, w, delta, stream);
+        linear(x, w, delta, policy, ws, stream);
         residual_add(delta, residual_out, stream);
         return;
     }

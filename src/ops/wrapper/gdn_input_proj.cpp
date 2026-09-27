@@ -83,7 +83,8 @@ void require_single_parent_nonoverlap(const Tensor& x, const Tensor& qkv, const 
 // Composed two-parent Q3 projection: [query,key] then [value,z] through one qualified
 // projection buffer, publishing qkv [10240,T] and z [6144,T].
 void dispatch_q3_input_pair(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
-                            Tensor& qkv, Tensor& z, WorkspaceArena& ws, cudaStream_t stream) {
+                            Tensor& qkv, Tensor& z, LinearPolicy policy, WorkspaceArena& ws,
+                            cudaStream_t stream) {
     constexpr std::int32_t kQkRows    = 4096;
     constexpr std::int32_t kValueRows = 6144;
     constexpr std::int32_t kZRows     = 6144;
@@ -91,11 +92,11 @@ void dispatch_q3_input_pair(const Tensor& x, const Weight& qk_weight, const Weig
     const std::int32_t columns        = x.ne[1];
     auto scope                        = ws.scope();
     Tensor qk                         = ws.alloc(DType::BF16, {kQkRows, columns});
-    linear(x, qk_weight, qk, stream);
+    linear(x, qk_weight, qk, policy, ws, stream);
     copy_columns(qk.data, kQkRows * kElem, 0, qkv.data, (kQkRows + kValueRows) * kElem, 0,
                  kQkRows * kElem, columns, stream);
     Tensor vz = ws.alloc(DType::BF16, {kValueRows + kZRows, columns});
-    linear(x, value_z_weight, vz, stream);
+    linear(x, value_z_weight, vz, policy, ws, stream);
     copy_columns(vz.data, (kValueRows + kZRows) * kElem, 0, qkv.data,
                  (kQkRows + kValueRows) * kElem, kQkRows * kElem, kValueRows * kElem, columns,
                  stream);
@@ -793,8 +794,8 @@ void gdn_input_proj(const Tensor& x, const Weight& qk_weight, const Weight& valu
     constexpr std::int32_t kParentRows = kValueRows + kZRows;
     const std::int32_t cols            = x.ne[1];
     if (cols <= 0) { throw std::invalid_argument("gdn_input_proj: T must be positive"); }
-    if (policy != LinearPolicy::A16Only) {
-        throw std::invalid_argument("gdn_input_proj: split pairs admit only A16");
+    if (policy != LinearPolicy::A16Only && policy != LinearPolicy::AllowA8) {
+        throw std::invalid_argument("gdn_input_proj: split pairs admit only A16 or A8");
     }
     require_matrix(x, kHidden, cols, "x");
     require_matrix(qkv, kQkvRows, cols, "qkv");
@@ -802,7 +803,7 @@ void gdn_input_proj(const Tensor& x, const Weight& qk_weight, const Weight& valu
     if (qk_weight.qtype == QType::Q3G128_F16S || value_z_weight.qtype == QType::Q3G128_F16S) {
         require_q3_rowsplit(qk_weight, kQkRows, "qk weight");
         require_q3_rowsplit(value_z_weight, kParentRows, "value/z weight");
-        dispatch_q3_input_pair(x, qk_weight, value_z_weight, qkv, z, workspace, stream);
+        dispatch_q3_input_pair(x, qk_weight, value_z_weight, qkv, z, policy, workspace, stream);
         return;
     }
     require_rowsplit(qk_weight, QType::Q4G64_F16S, kQkRows, "qk weight");
@@ -843,10 +844,16 @@ std::size_t gdn_input_proj_workspace_capacity_bytes(QType parent_qtype, std::int
         return 0;
     }
     if (parent_qtype == QType::Q3G128_F16S && parent_rows == 16384 && input_rows == 5120 &&
-        policy == LinearPolicy::A16Only) {
-        return static_cast<std::size_t>(4096 + 12288) *
-               static_cast<std::size_t>(max_tokens) * sizeof(std::uint16_t);
+        (policy == LinearPolicy::A16Only || policy == LinearPolicy::AllowA8)) {
+        // The pair projects [4096] then [12288] into one scope; the A8 activation is sized per
+        // projection and only the widest one can be live with the second projection.
+        WorkspaceLayoutBuilder layout;
+        (void)layout.alloc(DType::BF16, {4096 + 12288, max_tokens});
+        (void)layout.alloc_bytes(linear_workspace_capacity_bytes(
+            QType::Q3G128_F16S, 4096 + 12288, input_rows, policy, min_tokens, max_tokens));
+        return layout.peak_bytes(1);
     }
+    throw std::invalid_argument("gdn_input_proj workspace: unsupported parent qtype");
 }
 
 void gdn_input_proj(const Tensor& x, const Weight& query_key_value_z_weight, Tensor& qkv, Tensor& z,
@@ -1031,8 +1038,8 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& qk_weight,
             x, conv_weight, conv_states, valid_columns, initial_state_slots, snapshot_base_slots,
             query, key, value, z, kQueryRows, kKeyRows, kValueRows, geometry, ws, stream,
             [&](const Tensor& x_flat, Tensor& projected, Tensor& z_flat) {
-                dispatch_q3_input_pair(x_flat, qk_weight, value_z_weight, projected, z_flat, ws,
-                                       stream);
+                dispatch_q3_input_pair(x_flat, qk_weight, value_z_weight, projected, z_flat,
+                                       LinearPolicy::A16Only, ws, stream);
             });
         return;
     }
@@ -1102,7 +1109,8 @@ void gdn_input_proj_conv_record(const Tensor& x, const Weight& qk_weight,
                        query, key, value, z, geometry, workspace, stream,
                        [&](const Tensor& x_flat, Tensor& record_flat, Tensor& z_flat) {
                            dispatch_q3_input_pair(x_flat, qk_weight, value_z_weight, record_flat,
-                                                  z_flat, workspace, stream);
+                                                  z_flat, LinearPolicy::A16Only, workspace,
+                                                  stream);
                        });
         return;
     }

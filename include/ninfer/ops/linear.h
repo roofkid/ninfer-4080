@@ -85,7 +85,10 @@ enum class LinearPolicy : std::uint8_t {
  * `policy` specifies the permitted private activation-compute set. A permission does not require a
  * corresponding low-precision route: the resolved plan may remain A16 when that is the qualified
  * choice. BF16_CTRL admits only LinearPolicy::A16Only. Registered Q4/Q5/Q6/W8 formats admit
- * LinearPolicy::A16Only and LinearPolicy::AllowA8. The five non-vocabulary FP8 problems admit the
+ * LinearPolicy::A16Only and LinearPolicy::AllowA8. Q3G128_F16S admits the same two policies: an
+ * exact-K problem that is a whole number of 128-row blocks resolves T>=129 to the documented A8
+ * route (op-development.md 6.4) and padded-K or narrower problems to A16. The five non-vocabulary
+ * FP8 problems admit the
  * same two policies at every positive T. AllowA8 resolves `[14336,5120]` to A16 through T=11 and
  * A8 from T=12; `[16384,5120]` to A16 through T=10 and A8 from T=11; `[34816,5120]` to A8 at T=1,
  * A16 at T=2..4, and A8 from T=5; both `[5120,6144]` and `[5120,17408]` resolve T<25 to A16 and

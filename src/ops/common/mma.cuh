@@ -67,6 +67,18 @@ __device__ __forceinline__ void mma_s8(int& c0, int& c1, int& c2, int& c3, unsig
                  : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
 }
 
+// Non-accumulating form: D is the given C fragment instead of the current accumulator. Used to
+// seed an int32 group sum with a float magic constant so the exact sum is one FADD away.
+__device__ __forceinline__ void mma_s8_from(int& d0, int& d1, int& d2, int& d3, unsigned a0,
+                                            unsigned a1, unsigned a2, unsigned a3, unsigned b0,
+                                            unsigned b1, int c0, int c1, int c2, int c3) {
+    asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
+                 "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
+                 : "=r"(d0), "=r"(d1), "=r"(d2), "=r"(d3)
+                 : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "r"(c0), "r"(c1),
+                   "r"(c2), "r"(c3));
+}
+
 __device__ __forceinline__ void mma_fp8_e4m3(float& c0, float& c1, float& c2, float& c3,
                                              unsigned a0, unsigned a1, unsigned a2, unsigned a3,
                                              unsigned b0, unsigned b1) {

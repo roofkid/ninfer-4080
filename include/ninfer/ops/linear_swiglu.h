@@ -26,7 +26,9 @@ namespace ninfer::ops {
 
 /**
  * Policy-bearing capacity query. Q4/W8 admit A16Only. NVFP4 admits A16Only through T=16 and
- * AllowA4 for every positive T. Row-scaled FP8 admits A16Only and AllowA8 for every positive T.
+ * AllowA4 for every positive T. Q3G128_F16S admits A16Only and AllowA8: widths of at least 129
+ * tokens use the documented A8 route (op-development.md 6.4) and narrower widths A16. Row-scaled
+ * FP8 admits A16Only and AllowA8 for every positive T.
  * A permissive policy covers whichever qualified route the private resolver selects across the
  * requested interval.
  */

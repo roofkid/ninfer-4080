@@ -2,6 +2,8 @@
 
 #include "core/device.h"
 #include "ops/common/math.cuh"
+#include "ops/common/rowsplit_a8_quantize.h"
+#include "ops/linear/q3/q3_dispatch.h"
 #include "ops/linear/q3/q3_launch.h"
 #include "ops/linear/q3/q3_rowsplit_gemv_staged.cuh"
 
@@ -17,6 +19,7 @@ namespace {
 
 constexpr std::int32_t kGateUpRows = 34816;
 constexpr std::int32_t kOutputRows = kGateUpRows / 2;
+constexpr std::int32_t kInputCols  = 5120;
 constexpr std::int32_t kChunkCols  = 64;
 constexpr std::int32_t kGemvColumns = 8;
 constexpr std::int32_t kTallColumns = 64;
@@ -45,18 +48,28 @@ __global__ void q3_swiglu_epilogue_kernel(const float* __restrict__ proj,
 } // namespace
 
 std::size_t q3_linear_swiglu_workspace_capacity_bytes(std::int32_t min_tokens,
-                                                      std::int32_t max_tokens) {
+                                                      std::int32_t max_tokens,
+                                                      LinearPolicy policy) {
     if (min_tokens <= 0 || max_tokens < min_tokens) {
         throw std::invalid_argument("q3 linear_swiglu workspace: invalid token interval");
     }
-    if (max_tokens <= kGemvColumns || min_tokens >= kTallColumns) { return 0; }
-    const std::int64_t columns = std::min<std::int32_t>(max_tokens, kChunkCols - 1);
-    return static_cast<std::size_t>(2 * kOutputRows) * static_cast<std::size_t>(columns) *
-           sizeof(float);
+    if (policy != LinearPolicy::A16Only && policy != LinearPolicy::AllowA8) {
+        throw std::invalid_argument("q3 linear_swiglu workspace: Q3 admits only A16 or A8");
+    }
+    std::size_t bytes = 0;
+    if (policy == LinearPolicy::AllowA8 && max_tokens >= kQ3A8MinTokens) {
+        bytes = q3_a8_workspace_capacity_bytes(kInputCols, max_tokens);
+    }
+    if (max_tokens > kGemvColumns && min_tokens < kTallColumns) {
+        const std::int64_t columns = std::min<std::int32_t>(max_tokens, kChunkCols - 1);
+        bytes = std::max(bytes, static_cast<std::size_t>(2 * kOutputRows) *
+                                    static_cast<std::size_t>(columns) * sizeof(float));
+    }
+    return bytes;
 }
 
-void q3_linear_swiglu_dispatch(const Tensor& x, const Weight& w, Tensor& out, WorkspaceArena& ws,
-                               cudaStream_t stream) {
+void q3_linear_swiglu_dispatch(const Tensor& x, const Weight& w, Tensor& out,
+                               LinearPolicy policy, WorkspaceArena& ws, cudaStream_t stream) {
     if (w.qtype != QType::Q3G128_F16S || w.n != kGateUpRows || w.k != 5120 ||
         w.padded_shape[1] != 5120) {
         throw std::invalid_argument("q3 linear_swiglu: unsupported weight");
@@ -64,6 +77,13 @@ void q3_linear_swiglu_dispatch(const Tensor& x, const Weight& w, Tensor& out, Wo
     const std::int32_t columns = x.ne[1];
     if (columns <= 0 || out.ne[1] != columns) {
         throw std::invalid_argument("q3 linear_swiglu: invalid token extent");
+    }
+    if (q3_uses_a8(w.n, w.k, w.padded_shape[1], policy, columns)) {
+        auto scope = ws.scope();
+        A8G64Activation act = allocate_a8_g64_activation(ws, w.k, columns);
+        a8_g64_quantize(x, act, stream);
+        launch_q3_mma_tall_a8_swiglu_r64_c128(act, w, out, stream);
+        return;
     }
     if (columns <= kGemvColumns) {
         const dim3 grid(

@@ -80,7 +80,7 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
                      WorkspaceArena* workspace, cudaStream_t stream) {
     switch (w.qtype) {
     case QType::Q3G128_F16S:
-        detail::q3_dispatch(x, w, out, policy, stream);
+        detail::q3_dispatch(x, w, out, policy, workspace, stream);
         return;
     case QType::Q4G64_F16S:
         detail::q4_dispatch(x, w, out, policy, stream);
@@ -128,6 +128,14 @@ std::size_t linear_workspace_capacity_bytes(QType qtype, std::int32_t output_row
     case QType::Q3G128_F16S:
         (void)detail::select_q3_launch(output_rows, input_rows, min_tokens, policy);
         (void)detail::select_q3_launch(output_rows, input_rows, max_tokens, policy);
+        // The A8 activation is the only Q3 transient, and its size grows with the width. The
+        // padded-K question is not visible here; a padded weight falls back to A16 in dispatch
+        // and only over-reserves.
+        if (policy == LinearPolicy::AllowA8 && max_tokens >= detail::kQ3A8MinTokens &&
+            output_rows > 0 && (output_rows % 128) == 0 && input_rows > 0 &&
+            (input_rows % 64) == 0) {
+            return detail::q3_a8_workspace_capacity_bytes(input_rows, max_tokens);
+        }
         return 0;
     case QType::Q5G64_F16S:
         (void)detail::select_q5_launch(output_rows, input_rows, min_tokens, policy);

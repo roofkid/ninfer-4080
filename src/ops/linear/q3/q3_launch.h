@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/tensor.h"
+#include "ops/common/rowsplit_a8_quantize.h"
 
 #include <cuda_runtime.h>
 
@@ -22,5 +23,11 @@ void launch_q3_mma_tall_r128_c128(const Tensor& x, const Weight& w, Tensor& out,
 // Folded gate/up SwiGLU over the stacked Q3 parent, 64 output rows x 128 tokens per CTA.
 void launch_q3_mma_tall_swiglu_r64_c128(const Tensor& x, const Weight& w, Tensor& out,
                                         cudaStream_t stream);
+// A8 prefill routes: the activation is quantized per token and 64-code group by
+// a8_g64_quantize, and the weight codes multiply it with m16n8k32 s8 MMAs.
+void launch_q3_mma_tall_a8_r128_c128(const A8G64Activation& act, const Weight& w, Tensor& out,
+                                     cudaStream_t stream);
+void launch_q3_mma_tall_a8_swiglu_r64_c128(const A8G64Activation& act, const Weight& w,
+                                           Tensor& out, cudaStream_t stream);
 
 } // namespace ninfer::ops::detail

@@ -56,13 +56,13 @@ std::size_t linear_swiglu_workspace_capacity_bytes(QType qtype, std::int32_t gat
             gate_up_rows, gate_up_rows / 2, input_rows, input_rows, min_tokens, max_tokens);
     }
     if (qtype == QType::Q3G128_F16S) {
-        if (policy != LinearPolicy::A16Only) {
-            throw std::invalid_argument("linear_swiglu workspace: Q3 admits only A16");
+        if (policy != LinearPolicy::A16Only && policy != LinearPolicy::AllowA8) {
+            throw std::invalid_argument("linear_swiglu workspace: Q3 admits only A16 or A8");
         }
         if (gate_up_rows != 34816 || input_rows != 5120) {
             throw std::invalid_argument("linear_swiglu workspace: unsupported Q3 profile");
         }
-        return detail::q3_linear_swiglu_workspace_capacity_bytes(min_tokens, max_tokens);
+        return detail::q3_linear_swiglu_workspace_capacity_bytes(min_tokens, max_tokens, policy);
     }
     if (qtype == QType::NVFP4 && gate_up_rows == 34816 && input_rows == 5120) {
         return detail::nvfp4_linear_swiglu_workspace_capacity_bytes(policy, min_tokens, max_tokens);
@@ -139,13 +139,13 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
         return;
     }
     if (q3_weight) {
-        if (policy != LinearPolicy::A16Only) {
-            throw std::invalid_argument("linear_swiglu: Q3 admits only A16");
+        if (policy != LinearPolicy::A16Only && policy != LinearPolicy::AllowA8) {
+            throw std::invalid_argument("linear_swiglu: Q3 admits only A16 or A8");
         }
         if (!aligned_to(gate_up_weight.qdata, 16) || !aligned_to(gate_up_weight.scales, 4)) {
             throw std::invalid_argument("linear_swiglu: required code/scale alignment is missing");
         }
-        detail::q3_linear_swiglu_dispatch(x, gate_up_weight, out, ws, stream);
+        detail::q3_linear_swiglu_dispatch(x, gate_up_weight, out, policy, ws, stream);
         return;
     }
     if (policy != LinearPolicy::A16Only) {

@@ -241,9 +241,9 @@ void validate_profile(const Profile& profile) {
     }
     if ((nvfp4 && profile.activation_compute != ActivationCompute::A16 &&
          profile.activation_compute != ActivationCompute::A4) ||
-        (fp8 && profile.activation_compute != ActivationCompute::A16 &&
+        ((fp8 || q3) && profile.activation_compute != ActivationCompute::A16 &&
          profile.activation_compute != ActivationCompute::A8) ||
-        (!nvfp4 && !fp8 && profile.activation_compute != ActivationCompute::A16)) {
+        (!nvfp4 && !fp8 && !q3 && profile.activation_compute != ActivationCompute::A16)) {
         throw std::invalid_argument("linear_swiglu test: invalid activation-compute profile");
     }
 }

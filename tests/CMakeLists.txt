@@ -347,6 +347,7 @@ ninfer_add_op_test(ninfer_speculative_round_test
   SOURCES ops/test_speculative_round.cpp
   LIBRARIES ninfer_ops)
 ninfer_add_linear_test(ninfer_linear_q3_a16_test ops/linear/test_q3_a16.cpp)
+ninfer_add_linear_test(ninfer_linear_q3_a8_test ops/linear/test_q3_a8.cpp)
 ninfer_add_linear_test(ninfer_linear_q3_a16_tall_test ops/linear/test_q3_a16_tall.cpp)
 ninfer_add_linear_test(ninfer_linear_q3_a16_gemv_test ops/linear/test_q3_a16_gemv.cpp)
 ninfer_add_linear_test(ninfer_linear_q4_a16_test ops/linear/test_q4_a16.cpp)
@@ -417,6 +418,10 @@ ninfer_add_fused_linear_test(
 ninfer_add_fused_linear_test(
   ninfer_linear_swiglu_q3_a16_test
   ops/linear_swiglu/test_q3_a16.cpp
+  ops/linear_swiglu/linear_swiglu_test_common.cpp)
+ninfer_add_fused_linear_test(
+  ninfer_linear_swiglu_q3_a8_test
+  ops/linear_swiglu/test_q3_a8.cpp
   ops/linear_swiglu/linear_swiglu_test_common.cpp)
 ninfer_add_fused_linear_test(
   ninfer_linear_swiglu_w8_a16_test

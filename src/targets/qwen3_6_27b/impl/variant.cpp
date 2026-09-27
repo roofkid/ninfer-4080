@@ -49,6 +49,7 @@ constexpr ops::LinearPolicy kNvfp4TextPolicy = ops::LinearPolicy::A16Only;
 constexpr ops::LinearPolicy kNvfp4TextPolicy = ops::LinearPolicy::AllowA4;
 #endif
 constexpr ops::LinearPolicy kFp8TextPolicy   = ops::LinearPolicy::AllowA8;
+constexpr ops::LinearPolicy kQ3TextPolicy    = ops::LinearPolicy::AllowA8;
 
 ops::LinearPolicy text_policy(const Weight& weight) {
     switch (weight.qtype) {
@@ -56,6 +57,8 @@ ops::LinearPolicy text_policy(const Weight& weight) {
         return kNvfp4TextPolicy;
     case QType::FP8_E4M3FN_ROW_BF16S:
         return kFp8TextPolicy;
+    case QType::Q3G128_F16S:
+        return kQ3TextPolicy;
     default:
         return ops::LinearPolicy::A16Only;
     }
@@ -192,7 +195,7 @@ void Variant::attention_projection(const Tensor& hidden,
     if (const auto* split = std::get_if<SplitAttentionProjectionPayload>(&weights)) {
         if (split->query_key.qtype == QType::Q3G128_F16S) {
             ops::attn_input_proj(hidden, split->query_key, split->gate_value, query, gate, key,
-                                 value, ops::LinearPolicy::A16Only, workspace, stream);
+                                 value, kQ3TextPolicy, workspace, stream);
             return;
         }
         ops::attn_input_proj(hidden, split->query_key, split->gate_value, query, gate, key, value,
@@ -246,7 +249,7 @@ void Variant::gdn_input_projection(const Tensor& hidden, const GdnProjectionWeig
             std::get_if<SplitGdnInputProjectionPayload>(&weights.input_projection)) {
         if (split->query_key.qtype == QType::Q3G128_F16S) {
             ops::gdn_input_proj(hidden, split->query_key, split->value_z, qkv, output_gate_flat,
-                                ops::LinearPolicy::A16Only, workspace, stream);
+                                kQ3TextPolicy, workspace, stream);
             return;
         }
         ops::gdn_input_proj(hidden, split->query_key, split->value_z, qkv, output_gate_flat,
@@ -390,7 +393,7 @@ std::size_t Variant::attention_projection_workspace_capacity_bytes(WeightsProfil
     case WeightsProfile::Qwen38Gsq3:
         return ops::attn_input_proj_workspace_capacity_bytes(
             QType::Q3G128_F16S, TextConfig::query_size + TextConfig::kv_size, TextConfig::hidden,
-            ops::LinearPolicy::A16Only, first, last);
+            kQ3TextPolicy, first, last);
     case WeightsProfile::Qwen36Nvfp4:
         return ops::attn_input_proj_workspace_capacity_bytes(
             QType::NVFP4, 14336, TextConfig::hidden, kNvfp4TextPolicy, first, last);
@@ -413,7 +416,7 @@ std::size_t Variant::attention_output_projection_workspace_capacity_bytes(
     case WeightsProfile::Qwen38Gsq3:
         return ops::linear_add_workspace_capacity_bytes(QType::Q3G128_F16S, TextConfig::hidden,
                                                         TextConfig::query_size,
-                                                        ops::LinearPolicy::A16Only, first, last);
+                                                        kQ3TextPolicy, first, last);
     case WeightsProfile::Qwen36Nvfp4:
         return ops::linear_add_workspace_capacity_bytes(QType::NVFP4, TextConfig::hidden,
                                                         TextConfig::query_size, kNvfp4TextPolicy,
@@ -439,7 +442,7 @@ std::size_t Variant::gdn_input_projection_workspace_capacity_bytes(WeightsProfil
         return ops::gdn_input_proj_workspace_capacity_bytes(
             QType::Q3G128_F16S, 2 * (TextConfig::key_dim + TextConfig::value_dim),
             TextConfig::hidden,
-            ops::LinearPolicy::A16Only, first, last);
+            kQ3TextPolicy, first, last);
     case WeightsProfile::Qwen36Nvfp4:
         return ops::gdn_input_proj_workspace_capacity_bytes(QType::NVFP4, 16384, TextConfig::hidden,
                                                             kNvfp4TextPolicy, first, last);
@@ -528,7 +531,7 @@ std::size_t Variant::gdn_output_projection_workspace_capacity_bytes(WeightsProfi
     case WeightsProfile::Qwen38Gsq3:
         return ops::linear_add_workspace_capacity_bytes(QType::Q3G128_F16S, TextConfig::hidden,
                                                         TextConfig::value_dim,
-                                                        ops::LinearPolicy::A16Only, first, last);
+                                                        kQ3TextPolicy, first, last);
     case WeightsProfile::Qwen36Nvfp4:
         return ops::linear_add_workspace_capacity_bytes(
             QType::NVFP4, TextConfig::hidden, TextConfig::value_dim, kNvfp4TextPolicy, first, last);
@@ -557,7 +560,7 @@ std::size_t Variant::post_mixer_workspace_capacity_bytes(WeightsProfile weights_
                                           ops::LinearPolicy::A16Only, first, last);
     case WeightsProfile::Qwen38Gsq3:
         return post_mixer_workspace_bytes(QType::Q3G128_F16S, QType::Q3G128_F16S,
-                                          ops::LinearPolicy::A16Only, first, last);
+                                          kQ3TextPolicy, first, last);
     case WeightsProfile::Qwen36Nvfp4:
         return post_mixer_workspace_bytes(QType::NVFP4, QType::NVFP4, kNvfp4TextPolicy, first,
                                           last);
