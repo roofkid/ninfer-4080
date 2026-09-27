@@ -33,6 +33,7 @@ enum class WeightsProfile : std::uint8_t {
     Qwen38GroupwiseInt,
     Qwen36Nvfp4,
     Qwen38Nvfp4,
+    Qwen38Gsq3,
 };
 
 using Frontend        = qwen3_6::Frontend;
