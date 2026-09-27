@@ -33,7 +33,14 @@ rounds are disabled in the engine (the planner keeps `verify_window == draft_win
 the ruled-out components recorded in the 5c.3 result block, so the enabled path stays lossless.
 The full `ctest` set passes on the current build (127 tests, 115 passed, 12 expected skips, 0
 failed).
-The maintainer's D9 publication decision is now unblocked.
+**Session 8 (2026-09-27) took the decode-bandwidth audit's top item: the Q3 small-T GEMV now
+runs one cp.async-staged schedule for both the plain and the fused gate/up problem.** The new
+route is byte-identical to the direct route it replaces (a new byte-compare test covers every
+registered Q3 parent shape at T=1..8) and is 14.2% faster at T=1 and 4.5% faster at T=4, the
+MTP3 verify width; the engine decode is unchanged within noise (53.7 vs 53.8 tok/s on the §6
+`tg512` run). Details, the measured schedule sweep, and the identified next step (a small-T
+tensor-core or A8 route rather than more SIMT tuning) are in §11. The maintainer's D9
+publication decision is unblocked.
 
 Environment for this plan: the `Dockerfile.dev` image in this repository. It is the sandbox the
 maintainer hands to pi, with the host RTX 4080 passed through:
@@ -424,11 +431,12 @@ artifact stays `out/qwen3_8_27b_gsq3.ninfer`; none of these changes touch artifa
 ```
 
 Profiler note: `ncu` cannot read counters in this WSL2 container (`ERR_NVGPUCTRPERM`); use
-Nsight Systems. The bundled importer needs `libdw1` (already installed) and lives at
+Nsight Systems. The bundled importer needs `libdw.so.1` and lives at
 `/opt/nvidia/nsight-compute/2025.4.1/host/linux-desktop-glibc_2_11_3-x64/QdstrmImporter`:
-if `nsys profile` fails to write a `.nsys-rep`, run
+session 8 found this image without it and installed it with
+`apt-get install -y --no-install-recommends libdw1t64`; that is a container change, not a repo
+one, so re-check it after any image rebuild. If `nsys profile` fails to write a `.nsys-rep`, run
 `QdstrmImporter -i x.qdstrm -o x.nsys-rep -f`. Existing captures: `profiles/nsys/gsq3-*`.
-
 **5c.1 Q3 tall A16 GEMM (DONE 2026-09-27, session 6; evidence below).**
 
 - Fork: `4ba151c`. Ours: `src/ops/linear/q3/q3_rowsplit_gemm_mma.{cuh,cu}` (the current 32x64
@@ -682,10 +690,11 @@ DFlash2 on the 4080; multi-lane and preemption; the 5090 tree; Windows.
    artifact reference, the model card, and the port ledger.
 6. If the task is the remaining performance work, read **Stage 5c** first. 5c.1 is complete and
    both engine numbers are measured (32K 1406.34, 100K 1166.48 tok/s); D10's measured axes are
-   met. The next item is the maintainer's call: 5c.2 as headroom, 5c.3 for a decode lead, the Q3
-   small-T GEMV schedule port (§11 decode bandwidth audit), or Stage 6 publication. 5c.5 (DFlash2)
-   is a conditional candidate only: it does not fit the 100K profile as converted and is gated on
-   the 5c.3 wide-verify fix (§6).
+   met. Session 8 landed the Q3 small-T staged GEMV (byte-identical, T=1/T=4 op gains, engine
+   neutral — §11), so the remaining items are 5c.2 as headroom, 5c.3 for a decode lead (gated on
+   the wide-verify corruption), Stage 6 publication, or a small-T tensor-core/A8 route (§11).
+   5c.5 (DFlash2) is a conditional candidate only: it does not fit the 100K profile as converted
+   and is gated on the 5c.3 wide-verify fix (§6).
 
 ## 11. Stage log
 
@@ -1130,3 +1139,72 @@ decision.
 Note for the bench: `ninfer_linear_bench`'s `DRAM_%`/`READ_%` columns are calibrated to the 5090
 constant (1792 GB/s, printed as `dram_spec_gbs`), so they read ~2.4x low on this card; use the raw
 GB/s columns.
+
+### Q3 small-T staged GEMV (2026-09-27, session 8)
+
+**Landed.** The audit's top item: the direct warp-per-row Q3 GEMV (three scalar byte loads per
+window straight from global, no staging) is replaced by a cp.async-staged schedule. New file
+`src/ops/linear/q3/q3_rowsplit_gemv_staged.cuh` with `launch_q3_gemv_r8_c8_staged`; the fused
+gate/up (SwiGLU) decode route now runs the same kernel with the `Fused` problem instead of its
+own direct kernel (`q3_rowsplit_gemv_swiglu_kernel` removed).
+
+Shape of the schedule: one warp owns its rows' full K extent and walks it in stages of eight
+128-code groups. The next stages' code bytes are staged with `cp.async.cg` into warp-private
+shared memory (three-deep pipeline) and each lane decodes its eight-code window (bytes 3l..3l+2
+of the 48-byte group) from shared memory once per window, keeping the weights in registers while
+the column loop applies the activation values. The 32-lane warp covers two adjacent groups per
+iteration with lane half selecting the group. The plain problem puts one row per warp; the fused
+problem gives each lane the gate and up window of the same group, so the pair shares one
+activation read and the epilogue publishes `silu(gate) * up` with one BF16 rounding.
+
+**Exactness.** The staged plain route is byte-identical to the direct one: the new
+`tests/ops/linear/test_q3_a16_gemv.cpp` byte-compares `launch_q3_gemv_r8_c8` (kept as the
+reference), `launch_q3_gemv_r8_c8_staged` and the dispatched route over all seven registered Q3
+parent shapes at T=1..8, including the padded `[4096,4304]` shape. The fused staged route was
+byte-compared against the replaced direct kernel with a standalone probe on the real artifact's
+layer-0 `gate_up` weights at T=1..8 (identical, warm and cold); its in-tree evidence is the
+oracle suite `ninfer_linear_swiglu_q3_a16_test` plus the Q3 `linear`/`linear_add`/input-projection
+suites, which all pass.
+
+**Op bench** (`ninfer_linear_bench --qtype Q3 --n 34816 --k 5120 --sweep 1:9:1 --warmup 3
+--repeat 10`, cold L2, median µs; baseline = the direct route at the start of the session):
+
+| T | direct | staged | change |
+|---:|---:|---:|---:|
+| 1 | 201.7 | 173.1 | -14.2% |
+| 2 | 228.4 | 199.7 | -12.5% |
+| 3 | 249.0 | 231.4 | -7.1% |
+| 4 | 275.7 | 263.2 | -4.5% |
+| 5 | 302.1 | 297.0 | -1.7% |
+| 6 | 331.7 | 331.8 | 0.0% |
+| 7 | 362.5 | 366.6 | +1.1% |
+| 8 | 397.3 | 402.7 | +1.4% |
+
+CSV: `profiles/bench/5c-small-t/q3_34816x5120.csv`. The widths the MTP route uses are 1..6,
+where the staged route is equal or better.
+
+**Fused route at T=4** on the real layer-0 `gate_up` parent (standalone probe, real weights,
+cold L2 every sample): direct 261.3 µs -> staged 247.2 µs, at identical output bytes.
+
+**Engine.** The §6 `tg512` command, three runs each on the same card and build flags: baseline
+53.87 / 53.81 / 53.68 tok/s and staged 53.72 / 53.84 / 53.70 tok/s, all at acceptance
+0.3991416309 over 233 rounds. The change is engine-neutral: the op-level gain is real, but the
+round's Q3 time is dominated by the 256 small parent calls whose per-launch time is latency-bound
+rather than stream-bound, and by the rest of the round.
+
+**Measured schedule space (no further gain).** Each of these was run on the real shape: cp.async
+pipeline depth 3..7, stage size 2/4/8/16 groups, launch-bounds occupancy from 24 to 48 warps/SM,
+one row per warp vs the paired two-rows-per-warp layout, and `ca` vs `cg` staging. The best
+configuration is the landed one (8 groups, 3 stages, `cg`, 48 warps/SM plain / 24 fused); the
+others land within ~2% or worse. The staged pipeline alone streams at ~445 GB/s at T=4, the same
+cold-cache ceiling the W8/Q4 small-T kernels see, but the full route lands at ~265 (plain) / 270
+(fused) GB/s, so the consume is not overlapping the staging and the remaining 1.7x is not
+reachable with this SIMT structure. The identified next candidates are a small-T tensor-core route
+(8-column MMA tiles with the weights decoded to bf16 in shared, where the multiply leaves the
+instruction stream) or the 5c.2 A8 activation route; both are larger pieces of work than this
+port and neither is committed.
+
+**Note on the audit's fused figure.** The audit's 360 GB/s for the fused route came from the
+engine profile; measured back to back in one probe on the same real weights the direct fused
+kernel reaches 256 GB/s and the staged one 270 GB/s, so the engine figure was not an isolated-op
+measurement. The plain route's numbers do agree between the audit and the op bench.
