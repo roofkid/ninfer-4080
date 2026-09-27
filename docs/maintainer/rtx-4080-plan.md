@@ -4,8 +4,8 @@
 feasibility session on `rtx4090-port`. It is a temporary plan, not a permanent reference: delete it
 when the work is finished or abandoned (AGENTS.md, "Change consistency").
 
-**Progress (2026-09-27, session 6 + session 7): Stages 0–5 are recorded and Stage 5c.1 is complete
-with both engine numbers measured.** Stage 4's gate passed on the 4080: the 100K + vision + MTP3
+**Progress (2026-09-27, sessions 6–9): Stages 0–5 are recorded, and Stages 5c.1 and 5c.2 are
+complete with their engine numbers measured.** Stage 4's gate passed on the 4080: the 100K + vision + MTP3
 profile
 validates memory before listening, the retrieval and vision probes are exact, MTP3 acceptance at
 98K depth is 74.3%, and `/metrics` and `/slots` cross-check against the request timings. §11
@@ -41,6 +41,16 @@ MTP3 verify width; the engine decode is unchanged within noise (53.7 vs 53.8 tok
 `tg512` run). Details, the measured schedule sweep, and the identified next step (a small-T
 tensor-core or A8 route rather than more SIMT tuning) are in §11. The maintainer's D9
 publication decision is unblocked.
+**Session 9 (2026-09-27) landed 5c.2, the Q3 A8 int8 prefill route.** With `AllowA8` the exact-K
+Q3 parents run the documented per-token 64-code activation quantization and m16n8k32 s8 MMAs
+from 129 columns on; decode, MTP verification and padded-K problems keep A16. The new op suites
+apply the documented quantization in their FP64 oracle. On the 4080 the route is ~1.9x the A16
+tall GEMM at T=129..513, `pp32768` 1406.34 -> 2277.53 tok/s, `pp100000 --prefill-chunk 2688`
+1166.48 -> 1675.39 tok/s, quick perplexity 4.596525 -> 4.596095, full `ctest` clean, and decode
+unchanged (tg512 53.2-53.9 tok/s, same acceptance). The same kernel at T<=8 is slower than the
+staged small-T GEMV (377-420 us against 174-264 us on 34816x5120), so A8 was **not** enabled at
+decode widths and the decode prize still needs a dedicated small-T tensor-core design; details
+and the measured cause are in §11.
 
 Environment for this plan: the `Dockerfile.dev` image in this repository. It is the sandbox the
 maintainer hands to pi, with the host RTX 4080 passed through:
@@ -688,13 +698,14 @@ DFlash2 on the 4080; multi-lane and preemption; the 5090 tree; Windows.
    the next session does not repeat the investigation.
 5. Delete this file when the work is done or abandoned, and move the durable outcome into the
    artifact reference, the model card, and the port ledger.
-6. If the task is the remaining performance work, read **Stage 5c** first. 5c.1 is complete and
-   both engine numbers are measured (32K 1406.34, 100K 1166.48 tok/s); D10's measured axes are
-   met. Session 8 landed the Q3 small-T staged GEMV (byte-identical, T=1/T=4 op gains, engine
-   neutral — §11), so the remaining items are 5c.2 as headroom, 5c.3 for a decode lead (gated on
-   the wide-verify corruption), Stage 6 publication, or a small-T tensor-core/A8 route (§11).
-   5c.5 (DFlash2) is a conditional candidate only: it does not fit the 100K profile as converted
-   and is gated on the 5c.3 wide-verify fix (§6).
+6. If the task is the remaining performance work, read **Stage 5c** first. 5c.1 and 5c.2
+   (session 9, §11) are complete: the Q3 A8 prefill route takes 32K to 2277.53 and 100K
+   `--prefill-chunk 2688` to 1675.39 tok/s with the quality anchor unchanged (4.596095 quick).
+   Decode is unchanged because the same kernel loses to the staged A16 GEMV at T<=8, so that
+   axis still needs a dedicated small-T tensor-core design (whole-group staging, more CTAs per
+   SM); 5c.3 remains gated on the wide-verify corruption, and Stage 6 publication is otherwise
+   unblocked. 5c.5 (DFlash2) is a conditional candidate only: it does not fit the 100K profile
+   as converted and is gated on the 5c.3 wide-verify fix (§6).
 
 ## 11. Stage log
 
@@ -1208,3 +1219,58 @@ port and neither is committed.
 engine profile; measured back to back in one probe on the same real weights the direct fused
 kernel reaches 256 GB/s and the staged one 270 GB/s, so the engine figure was not an isolated-op
 measurement. The plain route's numbers do agree between the audit and the op bench.
+
+### Q3 A8 prefill route (2026-09-27, session 9)
+
+**Landed.** The 5c.2 port: the Q3G128_F16S prefill routes now quantize the activation per token
+and 64-code group (`src/ops/common/rowsplit_a8_quantize.{h,cu}`, the fork's documented
+contract) and multiply the weight codes with m16n8k32 s8 MMAs
+(`src/ops/linear/q3/q3_rowsplit_tall_a8_mma.{cuh,cu}`, adapted from the fork's `956b169`). The
+plain `linear` and the folded gate/up `linear_swiglu` routes select it from 129 columns on when
+the policy grants `AllowA8`; decode, MTP verification and padded-K problems keep A16. The Q3
+execution leaves now pass `kQ3TextPolicy` (`AllowA8`) and the split attention/GDN pair wrappers,
+`linear_add` and the workspace capacity queries thread the policy and the activation workspace.
+Semantics and the oracle are documented in op-development.md 6.4; the two new suites
+(`ninfer_linear_q3_a8_test`, `ninfer_linear_swiglu_q3_a8_test`) compare against an FP64 oracle
+that applies exactly the documented quantization, and cover the 129-column boundary, one and
+several token tiles and the padded-K fallback. Full `ctest`: 130 tests, 117 passed, 13 skipped,
+0 failed.
+
+**Op bench (plain route, 34816x5120, cold L2, median us; A16 = the tall route, A8 = the new
+route).**
+
+| T | A16 | A8 | change |
+|---:|---:|---:|---:|
+| 129 | 1233.9 | 649.3 | -47.4% |
+| 256 | 1249.3 | 667.6 | -46.6% |
+| 385 | 2278.4 | 1157.1 | -49.2% |
+| 513 | 2744.3 | 1585.2 | -42.2% |
+
+The T=385/513 rows use more token tiles than the 128-token tile needs, so a tail-aware split
+remains the optional follow-up (the engine chunk widths are multiples of 128).
+
+**Engine.** `pp32768` 1406.34 -> **2277.53 tok/s** (+61.9%); `pp100000 --prefill-chunk 2688`
+1166.48 -> **1675.39 tok/s** (+43.6%; logs `profiles/bench/5c-a8/session9-pp{32768,100000}.log`).
+Quick perplexity on the real artifact (`--corpus eval/corpora/perplexity-1m/manifest.json
+--quick --kv-dtype int8`) 4.596525 -> **4.596095** over the same 261,167 tokens (report under
+`profiles/perplexity/qwen3.8-27b/gsq3/int8-g64/ninfer-ppl-1m-v1/quick/`, log
+`profiles/bench/5c-a8/session9-ppl-quick.log`), so the quantization does not move the quality
+anchor. Decode is unchanged, as designed: the `tg512` run reports 53.18/53.89 tok/s at
+acceptance 0.3991416309 over 233 rounds, against 53.87/53.81/53.68 on the same command before
+the route (`profiles/bench/5c-a8/session9-tg512.log`), and T=4/6 dispatch to the staged A16
+GEMV.
+
+**A8 at decode widths: measured and rejected.** With the selection threshold temporarily at 1,
+the tall A8 kernel on 34816x5120 runs T=1 377, T=2 376, T=4 381, T=6 379, T=8 378 us against the
+staged A16 GEMV's 174/201/264/332/403 us, and the MTP verify width is T=4. The kernel is not
+stream-bound: a cp.async variant that staged the 24-byte code windows with 8-byte copies three
+steps deep measured 416-423 us over T<=8 (no gain), disabling the code transfer entirely left
+175 us, disabling the activation staging changed nothing, and a single CTA still took ~57 us to
+walk 80 steps. The transfers themselves move 66.8 MB of codes in ~240 us (~280 GB/s), and the
+access pattern explains the gap: each step touches 128 different 128-byte lines (one per weight
+row, 1920-byte row stride) and uses only 24 bytes of each, so the effective code traffic is
+several times the plane; the staged GEMV avoids this by staging whole 48-byte groups with
+16-byte copies at 16 warps/SM. A decode-side A8 route therefore needs a new small-T kernel
+(whole-group staging, more CTAs per SM, K-split) rather than the tall tile, and none of that is
+committed. The audit's ~1.6x projection holds only if the consume dominates; at these widths
+the staging, not the consume, is the remaining wall.

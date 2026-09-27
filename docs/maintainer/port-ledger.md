@@ -47,6 +47,19 @@ deleted when the work finishes. Three items belong in this ledger:
   route at T = 9..513; `pp32768` 1014.98 -> 1406.34 tok/s and `pp100000` 871.02 -> 1166.48 tok/s
   (full `ctest` clean), so D10's prefill axis is met and 5c.2 is now optional headroom. The
   remaining 5c.2-5c.4 ports keep their fork commits in the plan's table.
+- **Q3 A8 prefill route (plan 5c.2, landed in the working tree 2026-09-27, session 9;
+  uncommitted).** Adapted from `JGamboa/ninfer-4090-windows` `956b169` ("run the Q4/Q5 prefill
+  GEMMs on int8 tensor cores under AllowA8") to Q3G128_F16S: `src/ops/common/
+  rowsplit_a8_quantize.{h,cu}`, `src/ops/linear/q3/q3_rowsplit_tall_a8_mma.{cuh,cu}`, the
+  policy/workspace resolution in `q3_dispatch.*` and `q3_linear_swiglu.*`, and the wrapper and
+  Qwen3.8-27B execution-leaf policy threading. Exact-K parents from 129 columns run the
+  documented A8 route (`op-development.md` 6.4); decode, MTP verification and padded-K problems
+  keep A16. New suites `ninfer_linear_q3_a8_test` and `ninfer_linear_swiglu_q3_a8_test` apply
+  the documented quantization in their FP64 oracle. On the 4080 the route is ~1.9x the A16 tall
+  GEMM at T=129..513; `pp32768` 1406.34 -> 2277.53 tok/s and `pp100000 --prefill-chunk 2688`
+  1166.48 -> 1675.39 tok/s, quick perplexity 4.596525 -> 4.596095, and decode unchanged
+  (tg512 53.2-53.9 tok/s at the same acceptance). The same kernel at decode widths is slower
+  than the staged small-T GEMV, so A8 stays prefill-only.
 - **5c.3 n-gram drafts (partial port, 2026-09-27; wide verify window disabled).** Ported from
   `375542a`, `535f9c1`, and `be3b680`: `ngram_pool.h`/`ngram_policy.h` with the policy unit test,
   the `mtp_round` verify-width split and every engine/round-state/workspace/ReplaySSM consumer,
