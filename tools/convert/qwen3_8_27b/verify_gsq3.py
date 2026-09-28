@@ -39,7 +39,7 @@ from tools.convert.common.safetensors import ShardReader
 from tools.convert.qwen3_6.common import recipe as family_recipe
 from tools.convert.qwen3_6_27b import verify as family_verify
 
-from . import convert_gsq3, gsq3_source, inventory_gsq3 as inventory
+from . import convert_gsq3, dflash2_recipe, gsq3_source, inventory_gsq3 as inventory
 from . import recipe_gsq3 as recipe
 
 
@@ -97,6 +97,8 @@ class PayloadSummary:
     quantized_rows: int
     quantized_groups: int
     packed: PackedSummary
+    dflash2_direct_objects: int
+    dflash2_quantized_groups: int
     draft_rows: int
     resources: int
     processor_class: str
@@ -517,10 +519,64 @@ def _verify_resources_and_frontend(
         return type(processor).__name__, type(generation_config).__name__
 
 
+def _verify_dflash2_payloads(
+    artifact: Artifact,
+    dflash2_dir: Path,
+    target: torch.device,
+) -> tuple[int, int]:
+    """Verify the companion against its own pinned checkpoint.
+
+    Every BF16 object is compared word-for-word; every W8 matrix is compared on representative
+    rows against an independent re-quantization of the source, the policy the MTP and Vision
+    probes already use.
+    """
+
+    direct_objects = 0
+    quantized_objects = 0
+    quantized_groups = 0
+    with ShardReader.from_file(dflash2_dir / "model.safetensors") as reader:
+        for spec in inventory.DFLASH2_TENSOR_SPECS:
+            obj = artifact.find(spec.name)
+            if not isinstance(obj, TensorObject):
+                _contract_error(f"{spec.name} is not a tensor")
+            if spec.format == inventory.BF16:
+                stored = decode_direct(artifact.payload(obj), obj.format, obj.shape)
+                expected = dflash2_recipe.materialize_tensor(spec.name, reader)
+                if tuple(expected.shape) != obj.shape or not torch.equal(
+                    stored.view(torch.int16), expected.detach().cpu().view(torch.int16)
+                ):
+                    _contract_error(f"{spec.name} differs from its source")
+                direct_objects += 1
+                continue
+            if len(obj.shape) != 2 or obj.format != inventory.W8:
+                _contract_error(f"{spec.name} is not a W8 matrix")
+            rows = family_verify._three_indices(obj.shape[0])
+            expression = recipe.RECIPES_BY_NAME[spec.name].expression
+            source_rows = family_verify._materialize_rows(
+                expression,
+                rows,
+                family_verify._SourceSlices(reader),
+                torch.zeros(1, dtype=torch.int32),
+            )
+            quantized_groups += family_verify.verify_quantized_rows(
+                artifact.payload(obj),
+                obj.format,
+                obj.shape,
+                rows,
+                source_rows,
+                target,
+            )
+            quantized_objects += 1
+    if direct_objects + quantized_objects != len(inventory.DFLASH2_TENSOR_SPECS):
+        _contract_error("DFlash2 verification did not cover the complete companion")
+    return direct_objects, quantized_groups
+
+
 def verify_payloads(
     artifact: Artifact,
     gsq_dir: str | Path,
     official_dir: str | Path,
+    dflash2_dir: str | Path,
     device: str | torch.device = "cpu",
 ) -> PayloadSummary:
     """Verify stored tensors against the pinned source shards."""
@@ -575,6 +631,10 @@ def verify_payloads(
             )
             quantized_rows += len(rows)
 
+    dflash2_direct, dflash2_groups = _verify_dflash2_payloads(
+        artifact, Path(dflash2_dir), target
+    )
+
     processor_class, generation_config_class = _verify_resources_and_frontend(
         artifact, gsq_source_dir, official_source_dir
     )
@@ -584,6 +644,8 @@ def verify_payloads(
         quantized_rows=quantized_rows,
         quantized_groups=quantized_groups,
         packed=packed,
+        dflash2_direct_objects=dflash2_direct,
+        dflash2_quantized_groups=dflash2_groups,
         draft_rows=int(token_ids.numel()),
         resources=len(inventory.RESOURCE_SPECS),
         processor_class=processor_class,
@@ -595,10 +657,11 @@ def verify_artifact(
     artifact: Artifact,
     gsq_dir: str | Path,
     official_dir: str | Path,
+    dflash2_dir: str | Path,
     device: str | torch.device = "cpu",
 ) -> VerificationSummary:
     structure = validate_structure(artifact)
-    payload = verify_payloads(artifact, gsq_dir, official_dir, device)
+    payload = verify_payloads(artifact, gsq_dir, official_dir, dflash2_dir, device)
     return VerificationSummary(structure=structure, payload=payload)
 
 
@@ -609,6 +672,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("artifact", type=Path)
     parser.add_argument("--gsq-model", type=Path, required=True)
     parser.add_argument("--official-model", type=Path, required=True)
+    parser.add_argument("--dflash2-model", type=Path, required=True)
     parser.add_argument(
         "--device",
         default="cuda" if torch.cuda.is_available() else "cpu",
@@ -620,7 +684,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     with Artifact.open(arguments.artifact) as artifact:
         summary = verify_artifact(
-            artifact, arguments.gsq_model, arguments.official_model, arguments.device
+            artifact,
+            arguments.gsq_model,
+            arguments.official_model,
+            arguments.dflash2_model,
+            arguments.device,
         )
     print(json.dumps(asdict(summary), indent=2, sort_keys=True))
     return 0

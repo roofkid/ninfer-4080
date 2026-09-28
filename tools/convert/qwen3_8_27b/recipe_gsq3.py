@@ -25,7 +25,7 @@ from tools.convert.common.safetensors import ShardReader
 from tools.convert.qwen3_6.common import recipe as family_recipe
 from tools.convert.qwen3_6_27b import recipe as qwen3_6_recipe
 
-from . import gsq3_source, inventory_gsq3 as inventory
+from . import dflash2_recipe, gsq3_source, inventory_gsq3 as inventory
 
 
 SOURCE_BITS = 3
@@ -332,11 +332,19 @@ def _build_vision_recipes() -> tuple[ObjectRecipe, ...]:
     )
 
 
+def _build_dflash2_recipes() -> tuple[ObjectRecipe, ...]:
+    return tuple(
+        ObjectRecipe(spec.name, dflash2_recipe.DFLASH2_RECIPES_BY_NAME[spec.name].expression)
+        for spec in inventory.DFLASH2_TENSOR_SPECS
+    )
+
+
 RECIPE_SPECS: tuple[ObjectRecipe, ...] = (
     _build_text_core_recipes()
     + _build_draft_head_recipes()
     + _build_mtp_recipes()
     + _build_vision_recipes()
+    + _build_dflash2_recipes()
 )
 RECIPES_BY_NAME = {recipe.object_name: recipe for recipe in RECIPE_SPECS}
 
@@ -460,9 +468,20 @@ def mtp_recipes() -> tuple[ObjectRecipe, ...]:
     return tuple(selected)
 
 
+def dflash2_recipes() -> tuple[ObjectRecipe, ...]:
+    """Companion recipes whose sources live in the DFlash2 checkpoint, not the GSQ pair."""
+
+    return tuple(
+        recipe for recipe in direct_recipes() if recipe.object_name.startswith("dflash2/")
+    )
+
+
 def other_direct_recipes() -> tuple[ObjectRecipe, ...]:
     mtp = set(mtp_recipes())
-    return tuple(recipe for recipe in direct_recipes() if recipe not in mtp)
+    dflash2 = set(dflash2_recipes())
+    return tuple(
+        recipe for recipe in direct_recipes() if recipe not in mtp and recipe not in dflash2
+    )
 
 
 def _as_family_recipes(
@@ -499,6 +518,7 @@ __all__ = [
     "PackedSource",
     "RECIPES_BY_NAME",
     "RECIPE_SPECS",
+    "dflash2_recipes",
     "direct_recipes",
     "expression_shape",
     "materialize_packed",

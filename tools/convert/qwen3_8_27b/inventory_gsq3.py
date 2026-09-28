@@ -13,6 +13,8 @@ from dataclasses import replace
 
 from tools.convert.qwen3_6_27b import inventory as qwen3_6_inventory
 
+from .dflash2_inventory import DFLASH2_TENSOR_SPECS
+
 
 
 MODEL_ID = "qwen3.8-27b"
@@ -83,7 +85,10 @@ BASE_TENSOR_SPECS = (
     + MTP_TENSOR_SPECS
     + VISION_TENSOR_SPECS
 )
-TENSOR_SPECS = BASE_TENSOR_SPECS
+# The DFlash2 companion is part of the identity, exactly as in the groupwise artifact: MTP,
+# Vision and DFlash2 are bound ValidateOnly unless the run selects them, so one artifact serves
+# every speculative configuration.
+TENSOR_SPECS = BASE_TENSOR_SPECS + DFLASH2_TENSOR_SPECS
 OBJECT_SPECS: tuple[StoredObjectSpec, ...] = RESOURCE_SPECS + TENSOR_SPECS
 
 FORMAT_COUNTS = {
@@ -107,6 +112,7 @@ __all__ = [
     "ALIAS_SPECS",
     "BASE_TENSOR_SPECS",
     "BF16",
+    "DFLASH2_TENSOR_SPECS",
     "DRAFT_HEAD_TENSOR_SPECS",
     "FORMAT_COUNTS",
     "FORMAT_NAMES",

@@ -37,7 +37,35 @@ def test_format_assignment_matches_the_source_scheme() -> None:
         assert tensors[prefix + "post_attention_norm"].format == "BF16"
     assert tensors["mtp/layer/mlp/gate_up"].format == "W8G32_F16S"
     assert tensors["vision/patch_embedding"].format == "Q6G64_F16S"
-    assert all(not spec.name.startswith("dflash2/") for spec in inventory.TENSOR_SPECS)
+    # The DFlash2 companion is part of the identity: W8 matrices, BF16 everything else.
+    assert tensors["dflash2/feature_projection"].format == "W8G32_F16S"
+    assert tensors["dflash2/context_norm"].format == "BF16"
+    assert tensors["dflash2/final_norm"].format == "BF16"
+    assert tensors["dflash2/candidate_selector/hidden_projection"].format == "BF16"
+    assert tensors["dflash2/candidate_selector/predecessor_codebook"].format == "BF16"
+    assert (
+        tensors["dflash2/candidate_selector/successor_codebook"].shape == (248320, 256)
+    )
+    for layer in range(5):
+        prefix = f"dflash2/layers/{layer}/"
+        for suffix in (
+            "attention/query_key_value",
+            "attention/output",
+            "mlp/gate_up",
+            "mlp/down",
+        ):
+            assert tensors[prefix + suffix].format == "W8G32_F16S"
+        for suffix in (
+            "input_norm",
+            "attention_conv/base_kernel",
+            "attention_conv/kernel_projection",
+            "attention/query_norm",
+            "attention/key_norm",
+            "post_attention_norm",
+            "mlp_conv/base_kernel",
+            "mlp_conv/kernel_projection",
+        ):
+            assert tensors[prefix + suffix].format == "BF16"
 
 
 def test_inventory_and_recipe_coverage_are_the_registered_shape() -> None:
@@ -46,8 +74,9 @@ def test_inventory_and_recipe_coverage_are_the_registered_shape() -> None:
     assert len(inventory.DRAFT_HEAD_TENSOR_SPECS) == 2
     assert len(inventory.MTP_TENSOR_SPECS) == 12
     assert len(inventory.VISION_TENSOR_SPECS) == 333
-    assert len(inventory.TENSOR_SPECS) == 1118
-    assert len(inventory.OBJECT_SPECS) == 1124
+    assert len(inventory.DFLASH2_TENSOR_SPECS) == 66
+    assert len(inventory.TENSOR_SPECS) == 1184
+    assert len(inventory.OBJECT_SPECS) == 1190
     recipe.validate_recipe_coverage()
     assert len(recipe.RECIPE_SPECS) == len(inventory.TENSOR_SPECS)
     assert len(recipe.packed_requirements()) == 402
@@ -188,9 +217,14 @@ def test_real_source_preflight() -> None:
     official = os.environ.get("NINFER_QWEN3_8_27B_OFFICIAL_MODEL")
     if not official:
         pytest.skip("NINFER_QWEN3_8_27B_OFFICIAL_MODEL is not set")
-    preflight = convert.preflight_conversion(gsq_dir, Path(official))
-    assert len(preflight.object_plan.objects) == 1124
+    dflash2 = os.environ.get("NINFER_QWEN3_8_27B_DFLASH2_MODEL")
+    if not dflash2:
+        pytest.skip("NINFER_QWEN3_8_27B_DFLASH2_MODEL is not set")
+    preflight = convert.preflight_conversion(gsq_dir, Path(official), Path(dflash2))
+    assert len(preflight.object_plan.objects) == 1190
     assert preflight.packed_source_count == 402
+    assert preflight.dflash2_source.recipe_count == 66
+    assert preflight.dflash2_source.source_tensor_count == 81
 
 
 def test_real_artifact_structure() -> None:
@@ -201,5 +235,5 @@ def test_real_artifact_structure() -> None:
 
     with Artifact.open(Path(artifact_path)) as artifact:
         summary = validate_structure(artifact)
-    assert summary.objects == 1124
-    assert summary.tensors == 1118
+    assert summary.objects == 1190
+    assert summary.tensors == 1184

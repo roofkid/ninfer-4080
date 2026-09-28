@@ -5,14 +5,17 @@ Canonical invocation::
     python3 -m tools.convert.qwen3_8_27b.convert_gsq3 \
       --gsq-model /path/to/Qwen3.8-27B-3Bit-GSQ \
       --official-model /path/to/Qwen3.8-27B \
+      --dflash2-model /path/to/Qwen3.8-27B-DFlash2 \
       --out out/qwen3_8_27b_gsq3.ninfer
 
 The quantized body, the vocabulary endpoints, and the Vision tower come from
 the pinned GSQ release; the twelve MTP tensors and the frontend resources come
-from the official checkpoint.  Fused parents are row selections of the
-publisher's packed codes and scales: no code is decoded, requantized, or
-rounded, and the only numeric conversion is the audited bf16-to-binary16 scale
-width change.
+from the official checkpoint; the DFlash2 companion comes from the pinned
+draft release.  Fused parents are row selections of the publisher's packed
+codes and scales: no code is decoded, requantized, or rounded, and the only
+numeric conversion of the body is the audited bf16-to-binary16 scale width
+change.  The DFlash2 companion and the MTP head are quantized to W8G32 by the
+shared family recipe, exactly as in the groupwise-int identity.
 """
 
 from __future__ import annotations
@@ -41,9 +44,11 @@ from tools.convert.qwen3_6_27b import convert as family_config
 from tools.convert.qwen3_6_27b import draft_head
 
 from . import convert as base_convert
+from . import dflash2_recipe
 from . import gsq3_source
 from . import inventory_gsq3 as inventory
 from . import recipe_gsq3 as recipe
+from .dflash2_inventory import DFLASH2_TENSOR_SPECS
 
 
 RECIPE_ID = "qwen3_8_27b_gsq3-v1"
@@ -90,10 +95,13 @@ ObjectPlan = family_conversion.ObjectPlan
 class ConversionPreflight:
     gsq_dir: Path
     official_dir: Path
+    dflash2_dir: Path
     config_summary: dict[str, object]
+    dflash2_config_summary: dict[str, object]
     packed_source_count: int
     direct_source: family_recipe.SourcePreflight
     mtp_source: family_recipe.SourcePreflight
+    dflash2_source: family_recipe.SourcePreflight
     resources: tuple[ResourcePayload, ...]
     draft: draft_head.DraftHeadContext
     object_plan: ObjectPlan
@@ -190,9 +198,12 @@ def preflight_inventory() -> None:
         len(inventory.VISION_TENSOR_SPECS),
         len(inventory.TENSOR_SPECS),
         len(inventory.OBJECT_SPECS),
-    ) != (6, 771, 2, 12, 333, 1118, 1124):
+    ) != (6, 771, 2, 12, 333, 1184, 1190):
         raise ValueError("registered GSQ3 inventory is incomplete")
     recipe.validate_recipe_coverage()
+    dflash2_recipe.validate_recipe_coverage()
+    if len(DFLASH2_TENSOR_SPECS) != 66:
+        raise ValueError("registered DFlash2 companion inventory is incomplete")
 
 
 def build_object_plan(resources: Mapping[str, bytes]) -> ObjectPlan:
@@ -216,14 +227,23 @@ def open_official_reader(official_dir: Path) -> ShardReader:
 def preflight_conversion(
     gsq_model_dir: str | Path,
     official_model_dir: str | Path,
+    dflash2_model_dir: str | Path,
 ) -> ConversionPreflight:
     """Finish all checkpoint, inventory, shortlist, and offset work before writing."""
 
     gsq_dir = Path(gsq_model_dir)
     official_dir = Path(official_model_dir)
+    dflash2_dir = Path(dflash2_model_dir)
     config_summary = validate_config(
         family_conversion.load_json(gsq_dir / "config.json")
     )
+    dflash2_config_summary = dflash2_recipe.validate_config(
+        family_conversion.load_json(dflash2_dir / "config.json")
+    )
+    dflash2_recipe.validate_base_compatibility(
+        config_summary, dflash2_config_summary
+    )
+    dflash2_source = dflash2_recipe.preflight_sources(dflash2_dir)
     preflight_inventory()
     resources = load_frontend_resources(gsq_dir, official_dir)
     object_plan = build_object_plan({resource.name: resource.data for resource in resources})
@@ -238,10 +258,13 @@ def preflight_conversion(
     return ConversionPreflight(
         gsq_dir=gsq_dir,
         official_dir=official_dir,
+        dflash2_dir=dflash2_dir,
         config_summary=config_summary,
+        dflash2_config_summary=dflash2_config_summary,
         packed_source_count=packed_count,
         direct_source=direct_source,
         mtp_source=mtp_source,
+        dflash2_source=dflash2_source,
         resources=resources,
         draft=draft,
         object_plan=object_plan,
@@ -261,11 +284,19 @@ def materialize_object(
     spec: inventory.TensorSpec,
     gsq_reader: ShardReader,
     official_reader: ShardReader,
+    dflash2_reader: ShardReader,
     derived: Mapping[str, torch.Tensor],
     device: torch.device,
 ) -> tuple[bytes, gsq3_source.ScaleAudit | None]:
     """Materialize one artifact payload without requantizing a source code."""
 
+    if spec.name.startswith("dflash2/"):
+        tensor = dflash2_recipe.materialize_tensor(spec.name, dflash2_reader)
+        if tuple(tensor.shape) != spec.shape:
+            raise ValueError(
+                f"{spec.name}: materialized shape {tuple(tensor.shape)} != {spec.shape}"
+            )
+        return family_conversion.encode_tensor_payload(tensor, spec, device), None
     recipe_spec = recipe.RECIPES_BY_NAME[spec.name]
     expression = recipe_spec.expression
     if isinstance(
@@ -302,16 +333,21 @@ def _combined_source_preflight(
 ) -> family_recipe.SourcePreflight:
     direct = preflight.direct_source
     mtp = preflight.mtp_source
+    dflash2 = preflight.dflash2_source
     dtypes: Counter[str] = Counter(direct.source_dtype_counts)
     dtypes.update(mtp.source_dtype_counts)
+    dtypes.update(dflash2.source_dtype_counts)
     return family_recipe.SourcePreflight(
-        recipe_count=direct.recipe_count + mtp.recipe_count,
+        recipe_count=direct.recipe_count + mtp.recipe_count + dflash2.recipe_count,
         source_tensor_count=(
             direct.source_tensor_count
             + mtp.source_tensor_count
+            + dflash2.source_tensor_count
             + preflight.packed_source_count
         ),
-        source_shard_count=direct.source_shard_count + mtp.source_shard_count,
+        source_shard_count=(
+            direct.source_shard_count + mtp.source_shard_count + dflash2.source_shard_count
+        ),
         source_dtype_counts={"pack-quantized": preflight.packed_source_count, **dict(dtypes)},
     )
 
@@ -336,7 +372,10 @@ def build_conversion_report(
         model_dir=preflight.gsq_dir,
         out_path=out_path,
         arguments=arguments,
-        config_summary={"base": dict(preflight.config_summary)},
+        config_summary={
+            "base": dict(preflight.config_summary),
+            "dflash2": dict(preflight.dflash2_config_summary),
+        },
         source_preflight=_combined_source_preflight(preflight),
         objects=objects,
         elapsed_seconds=elapsed_seconds,
@@ -354,6 +393,11 @@ def build_conversion_report(
             "repository": OFFICIAL_REPOSITORY,
             "revision": OFFICIAL_REVISION,
             "model_path": str(preflight.official_dir.resolve()),
+        },
+        "dflash2": {
+            "repository": dflash2_recipe.REPOSITORY,
+            "revision": dflash2_recipe.REVISION,
+            "model_path": str(preflight.dflash2_dir.resolve()),
         },
         "ranking_path": str(ranking.resolve()),
     }
@@ -373,6 +417,12 @@ def build_conversion_report(
             "shards": preflight.mtp_source.source_shard_count,
             "dtypes": dict(preflight.mtp_source.source_dtype_counts),
         },
+        "dflash2": {
+            "recipes": preflight.dflash2_source.recipe_count,
+            "tensors": preflight.dflash2_source.source_tensor_count,
+            "shards": preflight.dflash2_source.source_shard_count,
+            "dtypes": dict(preflight.dflash2_source.source_dtype_counts),
+        },
     }
     report["scale_conversion"] = scale_audit.as_dict()
     report["scale_conversion"]["note"] = (
@@ -385,6 +435,7 @@ def build_conversion_report(
 def convert(
     gsq_model_dir: str | Path,
     official_model_dir: str | Path,
+    dflash2_model_dir: str | Path,
     out_path: str | Path,
     *,
     device: str | torch.device = "cuda",
@@ -393,11 +444,12 @@ def convert(
     output = Path(out_path)
     requested_device = str(device)
     resolved_device = pick_device(device)
-    preflight = preflight_conversion(gsq_model_dir, official_model_dir)
+    preflight = preflight_conversion(gsq_model_dir, official_model_dir, dflash2_model_dir)
     print(
         f"preflight complete: {len(preflight.object_plan.objects)} objects, "
         f"{preflight.packed_source_count} packed sources, "
         f"{preflight.mtp_source.source_tensor_count} MTP sources, "
+        f"{preflight.dflash2_source.source_tensor_count} DFlash2 sources, "
         f"device={resolved_device}",
         flush=True,
     )
@@ -420,11 +472,13 @@ def convert(
             print(f"[{index}/{total}] {spec.name}", flush=True)
         with ShardReader(preflight.gsq_dir) as gsq_reader, open_official_reader(
             preflight.official_dir
-        ) as official_reader:
+        ) as official_reader, ShardReader.from_file(
+            preflight.dflash2_dir / "model.safetensors"
+        ) as dflash2_reader:
             for spec in inventory.TENSOR_SPECS:
                 index += 1
                 payload, audit = materialize_object(
-                    spec, gsq_reader, official_reader, derived, resolved_device
+                    spec, gsq_reader, official_reader, dflash2_reader, derived, resolved_device
                 )
                 if audit is not None:
                     scale_audit = scale_audit.merge(audit)
@@ -436,6 +490,7 @@ def convert(
     arguments = {
         "gsq_model": str(gsq_model_dir),
         "official_model": str(official_model_dir),
+        "dflash2_model": str(dflash2_model_dir),
         "out": str(out_path),
         "device": requested_device,
     }
@@ -465,10 +520,17 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gsq-model", required=True, type=Path)
     parser.add_argument("--official-model", required=True, type=Path)
+    parser.add_argument("--dflash2-model", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args(argv)
-    convert(args.gsq_model, args.official_model, args.out, device=args.device)
+    convert(
+        args.gsq_model,
+        args.official_model,
+        args.dflash2_model,
+        args.out,
+        device=args.device,
+    )
 
 
 if __name__ == "__main__":
