@@ -71,6 +71,15 @@ multi-split E8 corruption that also occurs in narrow rounds, not a wide-window b
 ("Wide-verify root-cause update") has the evidence, the single-split localization, and the next
 step. No product code changed.**
 
+**Session 14 (2026-09-28) corrected the executed-path analysis of the same blocker: RK4V4E8
+is the E8-lattice packed-int4 mode, the session-13 K-decode suspects belong to RK2V4E8 only, and
+a 64M-sample device probe shows the warp-cooperative E8 projection agrees with the scalar and
+independent nearest-E8 projectors; see "RK4V4E8 executed-path correction" at the end of §11.**
+
+**Session 14's stock-test control then showed the gross deviation is not E8-specific: at default
+settings int8 diverges by 20.97 nats and rk4v4-e8 by 6.75 where bf16 stays at 0.5, so the
+shared quantized-KV small-T path is the target; see the control measurement at the end of §11.**
+
 Environment for this plan: the `Dockerfile.dev` image in this repository. It is the sandbox the
 maintainer hands to pi, with the host RTX 4080 passed through:
 
@@ -1610,3 +1619,89 @@ check against the split ranges first. Until then the wide window stays disabled 
 decode stays as validated by the session-4 profile - the corruption is a close-call flipper, not
 a systematic text breaker, but it must be fixed before the n-gram chain or DFlash2 K=5 are
 trusted on this KV format.
+
+### RK4V4E8 executed-path correction (2026-09-28, session 14)
+
+The session-13 "next step" named code that RK4V4E8 never executes. `RK4V4E8` is the **E8
+lattice + packed-int4** mode, not the cylinder/root mode:
+
+- `kv_fork_mode_flags(RK4V4E8)` (`src/core/paged_kv_storage.h:147`) returns
+  `{packed_v, rotate_k, rotate_v, packed_k, e8_lattice}`. The dispatch in
+  `causal_attention_small_t_launch_for` therefore instantiates the kernel with `PackedK=true,
+  E8Lattice=true, E8Root=false`; the `E8Root` branch (its `koff = ... + (key & mask) * 64 +
+  d/4` K reads and the append's `k_base + s * 2` writes) belongs to `RK2V4E8` only.
+- The RK4V4E8 plane geometry is `{U8, 128, FP16, 4}` for both planes
+  (`paged_kv_storage.h:102`): 128 bytes of packed int4 per key. The kernel's K/V staging is
+  `kv_cache_unpack_i4x16(kv_cache_i4_code_index(...))` - **byte-for-byte the same decode as
+  `RotatedInt4KeyInt4ValueGroup64` (rk4v4)**, which session 13 measured clean, and the same
+  staging as the `PackedK` branch of the standalone append.
+- The only RK4V4E8-specific code is the encoder `e8_project_8d_warp` (nearest E8 point before
+  the int4 rounding), called from the fused append (`small_t_i8.cuh`) and the standalone
+  append (`kv_cache/append/kernel.cuh`). The prompt route uses it too.
+
+**The projection is validated.** A throwaway device probe (2M random 64-dim groups per range,
+64M comparisons) compared the warp-cooperative encode against both the scalar
+`e8_project_8d_fast` and an independent nearest-E8 search (D8 u (D8 + 1/2)):
+
+| input range | warp vs scalar code mismatches | scalar vs independent mismatches |
+|---|---:|---:|
+| [-1, 1] | 6 / 64M (exact ties, both points equidistant) | 0 / 64M |
+| [-2.5, 2.5] | 0 / 64M | 0 / 64M |
+| [-7, 7] (production scale) | 0 / 64M | 0 / 64M |
+
+So the E8 encode is not the defect, and neither is the shared decode.
+
+**Where that leaves the root cause.** The strongest surviving evidence is the split-count
+dependence: forcing `causal_small_t_split_count` to 1 removes the divergence while 2 and 4 keep
+it, and the code as read makes the partitions numerically equivalent to within the FP32 merge
+order. A material difference (the failing column's ~2.25-nat swing) therefore implies a
+partition-dependent data path or a race, not rounding. The session-13 per-layer dumps should also
+be re-derived before further interpretation: in those files the E8 and BF16 verify taps are
+bit-identical at layers 3, 6 and 7, which no KV-format-dependent full-attention output should
+be, so regenerate them with the tap gate before trusting the layer localization.
+
+Decisive next experiment: replay the failing attention call with real data. Dump the input Q and
+the E8 K/V/scale bytes for the failing round (layer 3 is the first full-attention layer; frontier
+473, the four columns) from the MTP route, then run the small-T op on that snapshot at split
+counts 1/2/4/8 and compare each against an FP64 oracle computed from an independent decode of
+the same cache bytes. That separates (a) partition-dependent cache/append bytes, (b) a decode
+bug, and (c) tie-level numerics. Before bisecting further, land the missing committed coverage:
+the fork's `8b202c4` adds an RK4V4E8 host codec + FP64 oracle + fused/standalone append byte
+parity to `tests/ops/softmax_attention/causal_cache.cpp`, and our file's existing
+`{7, 467, 512}` / `{8, 467, 512}` cases are exactly the failing width/depth class; port it and
+add those cases. The stock repro entry point remains `ninfer_qwen3_6_27b_ngram_real_test` with
+`NINFER_NGRAM_KV_DTYPE=rk4v4-e8` (prompt 3, token 314).
+
+### Quantized-KV control measurement (2026-09-28, session 14)
+
+The session-13 "E8-only" localization does not survive the stock test at default settings (wide
+window disabled, `ninfer_qwen3_6_27b_ngram_real_test`, 6 prompts, 384 new tokens):
+
+| KV dtype | MTP divergences | largest scoring-route gap |
+|---|---:|---:|
+| bf16 | 3 / 1347 compared tokens | 0.5 nats |
+| int8 | 5 / 1156 | **20.97 nats** (prompt 3) |
+| rk4v4-e8 | 5 / 1014 | **6.75 nats** (prompt 3) |
+
+The bf16 flips are tie-scale (0.125-0.5 nats). The int8 gross case has the *plain* route's token
+rated at -20.97 nats against the verify's -0.0004, i.e. the decode-side route disagrees with the
+prefill scoring route by ~21 nats on a cache with no E8 projection, no rotation and no packed
+nibbles. So the defect is shared with the simpler `Int8Group64` small-T path and E8 is not
+required to reproduce it; the earlier "int8 clean" reading came from the temporary harness
+(wide-window enabled, different trajectory) and is withdrawn. Logs: `/tmp/s14_ngram_{bf16,int8,e8}.log`
+(same commands as the session-14 entry point).
+
+The simpler codec is the better repro. `Int8Group64` has no E8 projection, no rotation and no
+packed nibbles, so replaying the small-T vs prompt attention output on one cache isolates the
+split-K path with far less noise than the E8 route. `ninfer_softmax_attention_test` already
+covers `Int8Group64` against an FP64 oracle, so the failing configurations can be added there
+directly.
+
+```bash
+NINFER_TEST_ARTIFACT=out/qwen3_8_27b_gsq3.ninfer NINFER_NGRAM_KV_DTYPE=bf16 \
+  ./build/tests/ninfer_qwen3_6_27b_ngram_real_test
+NINFER_TEST_ARTIFACT=out/qwen3_8_27b_gsq3.ninfer NINFER_NGRAM_KV_DTYPE=int8 \
+  ./build/tests/ninfer_qwen3_6_27b_ngram_real_test
+NINFER_TEST_ARTIFACT=out/qwen3_8_27b_gsq3.ninfer NINFER_NGRAM_KV_DTYPE=rk4v4-e8 \
+  ./build/tests/ninfer_qwen3_6_27b_ngram_real_test
+```
