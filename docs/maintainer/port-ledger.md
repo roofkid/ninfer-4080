@@ -69,6 +69,22 @@ deleted when the work finishes. Three items belong in this ledger:
   produced a wrong correction logit at one column; the plan's Stage 5c.3 result block records
   the isolated round and the components ruled out. Do not re-enable before that is explained.
 
+- **DFlash2 Q4 companion (plan option 4's matrix half, landed 2026-09-28, session 12).** The gsq3
+  identity requantizes the 21 DFlash2 companion matrices from `W8G32_F16S` to `Q4G64_F16S` (the
+  norms and the two selector codebooks stay BF16): `inventory_gsq3.py` overrides the roles,
+  `verify_gsq3.py` re-quantizes each matrix independently, and the converter writes a
+  13,330,776,576-byte artifact (from 14,249,918,976). Runtime: profile-based `bind_dflash2`,
+  three new Q4 linear problems (`[5120,4096]`, `[5120,17408]`, `[5120,25600]` plus a K-generic
+  T=1 GEMV), Q4 branches in the three-output `attn_input_proj`, in
+  `linear_dynamic_grouped_conv_add` (shared activation-free finish kernel) and in
+  `context_kv_materialize` (composed qualified linear plus two store kernels), and
+  companion-format-aware scratch planning. The shared `dflash2_inventory.py` and the nvfp4
+  identity keep the W8 assignment. On the 4080 the DFlash2 K=7 caps move from 57,344 to 100,000
+  tokens text-only and from 28,672 to 65,536 with vision at the same safety margin; the code
+  scenario measures 100.9 tok/s at 38.2% acceptance (stock 93.4/35.7%) and the 8K/28K/56K depth
+  sweep 124.2/205.5/182.7 tok/s. Full `ctest` 131/131. The 8-bit selector codebook (about
+  0.12 GiB) remains open.
+
 ## Feature rows
 
 | Feature | 4090 (`rtx4090-port`) | 5090 (`nuntius-serve`) | Notes |

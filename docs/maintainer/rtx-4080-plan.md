@@ -56,8 +56,13 @@ named**: T=2..8 and the fused gate/up from two columns on, 106.7 tok/s on the tg
 design, the measured schedule space, and the A8 follow-up. **Session 11 landed the DFlash2
 companion in the artifact and its K=7 profile** (greedy-lossless, ~93 tok/s shallow and
 203/180 tok/s at 28K/56K depth against MTP3's 118/~112) at the stock-companion caps of 28K
-context with vision and 56K without, with the requantized companion (option 4) as the next step
-(§11).
+context with vision and 56K without. **Session 12 (2026-09-28) landed option 4's matrix half:** the
+gsq3 identity now carries the requantized Q4G64_F16S companion (selector and norms stay BF16),
+which moves the DFlash2 caps on this card to 100,000 tokens without vision and 65,536 with it at
+the same safety margin, keeps K=7 greedy-lossless, and measures 100.9 tok/s at 38.2% acceptance
+on the code scenario (stock 93.4/35.7%) and 124.2/205.5/182.7 tok/s at 8K/28K/56K depth. The
+8-bit selector codebook (option 4's remaining ~0.12 GiB) is the only unlanded slice; §11 has the
+design, verification, and measured fit.
 
 Environment for this plan: the `Dockerfile.dev` image in this repository. It is the sandbox the
 maintainer hands to pi, with the host RTX 4080 passed through:
@@ -641,7 +646,10 @@ work starts. Until then this stays a candidate, not a stage.
 **Session-11 outcome:** the artifact half is landed (stock companion, verified), and DFlash2 K=7 -
 the window users are expected to run - is greedy-lossless and measured at the caps in §11. The
 pre-existing K=5 divergence is reproduced on the old Q3 GEMV route as well and is deferred; the
-requantized companion (the memory decision) is the next step.
+requantized companion (the memory decision) was the next step. **Session-12 outcome:** the
+requantized companion's matrix half is landed (Q4G64_F16S, 13,330,776,576 bytes) and the K=7
+profile now fits 100,000 tokens text-only / 65,536 with vision at the same safety margin; the
+8-bit selector codebook remains as the final ~0.12 GiB slice.
 
 **Open questions for the maintainer.**
 
@@ -726,8 +734,10 @@ DFlash2 on the 4080; multi-lane and preemption; the 5090 tree; Windows.
    publication is otherwise unblocked, and the identified next decode lever is the A8 profile
    of the new kernel (§11). 5c.5 (DFlash2) is past its artifact gate: session 11 (§11) landed the
    companion in the GSQ3 identity and its K=7 profile at 28K (vision) / 56K (text) context, which
-   is greedy-lossless; the next step is the requantized companion for the 100K profile
-   (option 4), and the pre-existing K=5 narrow-window divergence is documented and deferred.
+   is greedy-lossless; session 12 (§11) then requantized the companion matrices to Q4G64_F16S,
+   which puts the K=7 profile at 100,000 tokens text-only / 65,536 with vision at the same safety
+   margin with unchanged-or-better decode. The 8-bit selector codebook is option 4's last slice;
+   the pre-existing K=5 narrow-window divergence is documented and deferred.
 
 ## 11. Stage log
 
@@ -1433,7 +1443,7 @@ off there; shallow greedy is at parity. Measured fit with the stock companion (R
 - **28,672 with vision** (28K): 12.8 GiB weights, 1.50 GiB runtime reservation, 525 MiB free,
   122 MiB planned slack. 30,720 fails by 16 MiB.
 
-Launchers: `scripts/run-ninfer-4080-dflash2.{bat,sh}` (K=7, `NINFER_VISION=1` selects the 28K
+Launchers: `scripts/run-ninfer-4080-dflash2.{bat,sh}` (K=7, `NINFER_VISION=1` selects the 65,536
 vision cap, `NINFER_CONTEXT` overrides); the MTP launcher keeps the 100K profile.
 
 **The K=5 caveat (deferred, pre-existing).** Greedy DFlash2 K=5 on the code scenario diverges from
@@ -1444,8 +1454,44 @@ tg512 fixture's DFlash2 acceptance collapses at K=5/K=7 (13.9% / 21.0% against K
 the real workloads do not. K=7 is the priority window and is unaffected; do not chase K=5 before it
 matters.
 
-**Next (option 4).** Requantizing the companion (Q4G64 matrices -0.86 GiB, int8 selector -0.12 GiB)
-buys roughly 50K tokens at the same safety margin, i.e. about 78K with vision and 100K+ without,
-and needs the `bind_dflash2` format acceptance, the two fused DFlash2 leaves
-(`w8_dflash2_linear_swiglu`, `w8_dflash2_attn_input`) or their Q4 peers, and a draft-quality gate
-against the stock companion.
+### DFlash2 Q4 companion (2026-09-28, session 12)
+
+**Landed (option 4's matrix half).** The gsq3 identity requantizes the 21 companion matrices from
+the stock `W8G32_F16S` grid to `Q4G64_F16S` (4.25 bpw); the dynamic-conv/norm vectors and the two
+selector codebooks stay BF16. The artifact is **13,330,776,576 bytes over 1190 objects** (was
+14,249,918,976), the predicted -0.856 GiB. The body re-verifies byte-for-byte (323/323 packed
+objects, 323/323 scales equal, 218 rounded, max error 2.98e-8); the companion verifies 45 BF16
+objects word-for-word plus 21 independent re-quantizations over 189 sampled groups. The shared
+`dflash2_inventory.py` and the nvfp4 identity keep the W8 assignment.
+
+- Converter: `inventory_gsq3.py` overrides the five matrix roles (feature projection, QKV,
+  attention output, gate/up, down); `verify_gsq3.py` accepts the spec format and re-quantizes
+  each matrix independently.
+- Runtime: `bind_dflash2` picks the format from the weights profile; `q4_dispatch` gains
+  `[5120,4096]`, `[5120,17408]` and `[5120,25600]` plus a K-generic T=1 GEMV; the three-output
+  `attn_input_proj` projects the query/key/value row views through three qualified Q4 linears;
+  `linear_dynamic_grouped_conv_add` shares its activation-free finish kernel and adds a Q4
+  projection; `context_kv_materialize` gains a composed Q4 route (qualified Q4 linear plus two
+  store kernels that own the norm/RoPE and the BF16->FP16 boundary). `linear_swiglu` already
+  served `[34816,5120]` in Q4; the scratch planner now covers both companion formats.
+- Verification: full `ctest` **131 of 131 pass**; new Q4 coverage for the three linear problems,
+  the QKV split (T=1..128 eager and graph), the conv-add (W=2..16, B=1..8) and the composed
+  context route (Tiny-scale Q4 weights, both formats in one binary). Real engine test: K=7 and
+  K=15 at B=1 with CUDA graphs and the optimized selector, eager K=7 and `int8` KV all keep the
+  ordinary-decoding identity. B=8 still does not fit (6.17 GiB runtime reservation); the full
+  proposal head remains unsupported for the Q4 output head (pre-existing; the profile uses the
+  optimized selector).
+- Fit (RK4V4-E8, `--host-kv-mib 4096`, K=7, B=1): **100,000 text-only** starts with 11.7 GiB
+  weights, `runtime_reservation_bytes=2,879,649,280`, 625 MiB `available_after_startup` and
+  78 MiB planned slack, matching the stock companion's 57,344-token margin; **65,536 with vision**
+  leaves 655 MiB free and 108 MiB slack. Hard limits: 104,448 text (106,496 fails by 18.5 MB) and
+  71,680 with vision (73,728 fails by 17 MB).
+- Draft quality: the K=7 code scenario (256 greedy tokens) runs **100.9 tok/s at 38.2% acceptance**
+  against the stock 93.4 tok/s / 35.7%; the depth sweep is **124.2/205.5/182.7 tok/s at
+  8K/28K/56K** against the stock 122.5/203.5/180.2, with prefill 2656/2308/1949 tok/s.
+
+**Remaining (option 4's selector half).** The two BF16 selector codebooks (0.254 GB) hold the last
+~0.12 GiB. No 8-bit codebook format is registered; `FP8_E4M3FN_ROW_BF16S` is the only row-scaled
+8-bit candidate (-0.117 GiB, about +5.5K tokens) and needs a codebook decode path in
+`candidate_selector_path` plus converter/verifier/op work. It is not required for the 100K text
+profile and is deferred.

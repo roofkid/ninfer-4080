@@ -4,9 +4,9 @@
 # Docker Desktop or Docker.
 #
 # Builds (once) the product image from ./Dockerfile and serves the DFlash2 profile at
-# the context that fits the 16 GiB card with the stock companion:
+# the context that fits the 16 GiB card with the requantized Q4 companion:
 #
-#   * 57,344-token context without vision, 28,672 with vision (measured caps; override
+#   * 100,000-token context without vision, 65,536 with vision (measured caps; override
 #     with NINFER_CONTEXT)
 #   * DFlash2 block drafting with 7 draft tokens (verify width 8, the widest window on
 #     the fast small-T tensor-core route), LM-head proposal selector
@@ -15,9 +15,9 @@
 #     the neutral value 1 is its implicit behavior.
 #
 # Measured on this card (docs/maintainer/rtx-4080-plan.md section 11): DFlash2 K=7
-# decodes about 122/203/180 tok/s at 8K/28K/56K depth against MTP3's 125/118/103, is
-# greedy-lossless against ordinary decoding, and needs the smaller context because the
-# companion weights and ring state cost about 1.9 GiB more than MTP. MTP stays the
+# decodes about 124/205/183 tok/s at 8K/28K/56K depth against MTP3's 125/118/103, is
+# greedy-lossless against ordinary decoding, and needs a smaller context because the
+# companion weights and ring state cost about 0.8 GiB more than MTP. MTP stays the
 # 100K profile (scripts/run-ninfer-4080.sh) because it is smaller; DFlash2 is the
 # deeper-context speed option.
 #
@@ -53,10 +53,10 @@ artifact_dir="$(cd -- "$(dirname -- "$artifact")" && pwd)"
 artifact_name="$(basename -- "$artifact")"
 
 if [[ "$vision" == "1" ]]; then
-    context="${NINFER_CONTEXT:-28672}"
+    context="${NINFER_CONTEXT:-65536}"
     vision_args=(--vision)
 else
-    context="${NINFER_CONTEXT:-57344}"
+    context="${NINFER_CONTEXT:-100000}"
     vision_args=()
 fi
 

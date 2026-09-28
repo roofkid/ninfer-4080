@@ -4,9 +4,10 @@ rem  NInfer on the RTX 4080 with the DFlash2 draft model, Windows host through
 rem  Docker Desktop / WSL2.
 rem
 rem  Builds (once) the product image from .\Dockerfile and serves the DFlash2
-rem  profile at the context that fits the 16 GiB card with the stock companion:
+rem  profile at the context that fits the 16 GiB card with the requantized Q4
+rem  companion:
 rem
-rem    * 57,344-token context without vision, 28,672 with vision (measured caps;
+rem    * 100,000-token context without vision, 65,536 with vision (measured caps;
 rem      set NINFER_CONTEXT to override)
 rem    * DFlash2 block drafting with 7 draft tokens (verify width 8, the widest
 rem      window on the fast small-T tensor-core route), LM-head proposal selector
@@ -15,10 +16,10 @@ rem      presence/frequency penalties 0. This engine has no multiplicative repea
 rem      penalty; the neutral value 1 is its implicit behavior.
 rem
 rem  Measured on this card (docs\maintainer\rtx-4080-plan.md section 11): DFlash2
-rem  K=7 decodes about 122/203/180 tok/s at 8K/28K/56K depth against MTP3's
-rem  125/118/103, is greedy-lossless against ordinary decoding, and needs the
+rem  K=7 decodes about 124/205/183 tok/s at 8K/28K/56K depth against MTP3's
+rem  125/118/103, is greedy-lossless against ordinary decoding, and needs a
 rem  smaller context because the companion weights and ring state cost about
-rem  1.9 GiB more than MTP. MTP stays the 100K profile (run-ninfer-4080.bat);
+rem  0.8 GiB more than MTP. MTP stays the 100K profile (run-ninfer-4080.bat);
 rem  DFlash2 is the deeper-context speed option.
 rem
 rem  The image carries only the binaries; the artifact is bind-mounted read-only.
@@ -45,9 +46,9 @@ if not defined NINFER_VISION set "NINFER_VISION=0"
 
 set "VISION_ARG="
 if "%NINFER_VISION%"=="0" (
-  if not defined NINFER_CONTEXT set "NINFER_CONTEXT=57344"
+  if not defined NINFER_CONTEXT set "NINFER_CONTEXT=100000"
 ) else (
-  if not defined NINFER_CONTEXT set "NINFER_CONTEXT=28672"
+  if not defined NINFER_CONTEXT set "NINFER_CONTEXT=65536"
   set "VISION_ARG=--vision"
 )
 
