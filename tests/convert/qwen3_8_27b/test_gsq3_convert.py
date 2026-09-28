@@ -37,8 +37,9 @@ def test_format_assignment_matches_the_source_scheme() -> None:
         assert tensors[prefix + "post_attention_norm"].format == "BF16"
     assert tensors["mtp/layer/mlp/gate_up"].format == "W8G32_F16S"
     assert tensors["vision/patch_embedding"].format == "Q6G64_F16S"
-    # The DFlash2 companion is part of the identity: W8 matrices, BF16 everything else.
-    assert tensors["dflash2/feature_projection"].format == "W8G32_F16S"
+    # The DFlash2 companion is part of the identity: requantized Q4 matrices, BF16 everything
+    # else. The shared `dflash2_inventory` keeps the stock W8 assignment for the nvfp4 profile.
+    assert tensors["dflash2/feature_projection"].format == "Q4G64_F16S"
     assert tensors["dflash2/context_norm"].format == "BF16"
     assert tensors["dflash2/final_norm"].format == "BF16"
     assert tensors["dflash2/candidate_selector/hidden_projection"].format == "BF16"
@@ -54,7 +55,7 @@ def test_format_assignment_matches_the_source_scheme() -> None:
             "mlp/gate_up",
             "mlp/down",
         ):
-            assert tensors[prefix + suffix].format == "W8G32_F16S"
+            assert tensors[prefix + suffix].format == "Q4G64_F16S"
         for suffix in (
             "input_norm",
             "attention_conv/base_kernel",
@@ -66,6 +67,16 @@ def test_format_assignment_matches_the_source_scheme() -> None:
             "mlp_conv/kernel_projection",
         ):
             assert tensors[prefix + suffix].format == "BF16"
+
+
+def test_shared_companion_keeps_the_stock_w8_assignment() -> None:
+    from tools.convert.qwen3_8_27b import dflash2_inventory
+
+    matrices = [
+        spec for spec in dflash2_inventory.DFLASH2_TENSOR_SPECS if spec.format != "BF16"
+    ]
+    assert len(matrices) == 21
+    assert all(spec.format == "W8G32_F16S" for spec in matrices)
 
 
 def test_inventory_and_recipe_coverage_are_the_registered_shape() -> None:

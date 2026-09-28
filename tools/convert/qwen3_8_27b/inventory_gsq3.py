@@ -4,7 +4,8 @@ The graph, namespace, and non-vocabulary storage roles are identical to the
 registered Qwen3.6-27B groupwise artifact.  The only differences are the body
 weight format (the source's own 3-bit group-128 grid) and the vocabulary
 endpoints (the source's 4-bit group-64 grid, which is also the draft-head
-format).
+format).  The DFlash2 companion matrices are requantized to that same 4-bit grid so the full
+profile fits a 16 GB card; the companion's norms, dynamic convolutions, and selector stay BF16.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from dataclasses import replace
 
 from tools.convert.qwen3_6_27b import inventory as qwen3_6_inventory
 
-from .dflash2_inventory import DFLASH2_TENSOR_SPECS
+from . import dflash2_inventory
 
 
 
@@ -78,6 +79,32 @@ DRAFT_HEAD_TENSOR_SPECS = tuple(
 )
 MTP_TENSOR_SPECS = qwen3_6_inventory.MTP_TENSOR_SPECS
 VISION_TENSOR_SPECS = qwen3_6_inventory.VISION_TENSOR_SPECS
+
+# The 16 GB profile requantizes the 21 companion matrices from the stock W8 grid to the 4-bit
+# group-64 grid; the companion norms, dynamic convolutions, and selector stay BF16. The shared
+# inventory and the nvfp4 identity keep the stock W8 assignment.
+_DFLASH2_Q4_SUFFIXES = (
+    "attention/query_key_value",
+    "attention/output",
+    "mlp/gate_up",
+    "mlp/down",
+)
+
+
+def _dflash2_gsq_format(name: str, numeric_format: str) -> str:
+    if name == "dflash2/feature_projection":
+        return Q4
+    parts = name.split("/")
+    if len(parts) >= 4 and parts[0] == "dflash2" and parts[1] == "layers":
+        if "/".join(parts[3:]) in _DFLASH2_Q4_SUFFIXES:
+            return Q4
+    return numeric_format
+
+
+DFLASH2_TENSOR_SPECS = tuple(
+    replace(spec, format=_dflash2_gsq_format(spec.name, spec.format))
+    for spec in dflash2_inventory.DFLASH2_TENSOR_SPECS
+)
 
 BASE_TENSOR_SPECS = (
     TEXT_CORE_TENSOR_SPECS

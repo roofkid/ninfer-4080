@@ -526,9 +526,9 @@ def _verify_dflash2_payloads(
 ) -> tuple[int, int]:
     """Verify the companion against its own pinned checkpoint.
 
-    Every BF16 object is compared word-for-word; every W8 matrix is compared on representative
-    rows against an independent re-quantization of the source, the policy the MTP and Vision
-    probes already use.
+    Every BF16 object is compared word-for-word; every companion matrix is compared on
+    representative rows against an independent re-quantization of the source, the policy the MTP
+    and Vision probes already use.
     """
 
     direct_objects = 0
@@ -548,8 +548,8 @@ def _verify_dflash2_payloads(
                     _contract_error(f"{spec.name} differs from its source")
                 direct_objects += 1
                 continue
-            if len(obj.shape) != 2 or obj.format != inventory.W8:
-                _contract_error(f"{spec.name} is not a W8 matrix")
+            if len(obj.shape) != 2 or obj.format != spec.format:
+                _contract_error(f"{spec.name} is not a {spec.format} matrix")
             rows = family_verify._three_indices(obj.shape[0])
             expression = recipe.RECIPES_BY_NAME[spec.name].expression
             source_rows = family_verify._materialize_rows(
