@@ -64,6 +64,13 @@ on the code scenario (stock 93.4/35.7%) and 124.2/205.5/182.7 tok/s at 8K/28K/56
 8-bit selector codebook (option 4's remaining ~0.12 GiB) is the only unlanded slice; §11 has the
 design, verification, and measured fit.
 
+**Session 13 (2026-09-28) is a read-only audit: fresh per-kernel decode/prefill breakdowns, the A8
+tall GEMM's measured streaming floor, and a ranked candidate list are in §11 ("Remaining-
+performance audit"). The same session re-framed the 5c.3 wide-verify blocker: it is a small-T
+multi-split E8 corruption that also occurs in narrow rounds, not a wide-window bug; §11
+("Wide-verify root-cause update") has the evidence, the single-split localization, and the next
+step. No product code changed.**
+
 Environment for this plan: the `Dockerfile.dev` image in this repository. It is the sandbox the
 maintainer hands to pi, with the host RTX 4080 passed through:
 
@@ -1141,7 +1148,9 @@ produced a wrong correction token:
 Resume options for the next session: (a) explain the column-2 corruption (e.g. by dumping the
 per-layer hidden states of the failing verify round and comparing them with a prefill of the same
 prefix), or (b) drop the n-gram feature if the wide path is not worth it, since D10 is already met
-without it. Do not re-enable wide rounds before the corruption is explained.
+without it. Do not re-enable wide rounds before the corruption is explained. **Session 13
+partially answered (a): the corruption is not wide-window-specific and the small-T multi-split
+E8 path is the culprit; see "Wide-verify root-cause update" below.**
 
 ### Decode bandwidth audit (2026-09-27, session 7 follow-up)
 
@@ -1495,3 +1504,109 @@ objects word-for-word plus 21 independent re-quantizations over 189 sampled grou
 8-bit candidate (-0.117 GiB, about +5.5K tokens) and needs a codebook decode path in
 `candidate_selector_path` plus converter/verifier/op work. It is not required for the 100K text
 profile and is deferred.
+
+### Remaining-performance audit (2026-09-28, session 13)
+
+Fresh Nsight Systems captures on the session-12 artifact (`out/qwen3_8_27b_gsq3.ninfer`,
+13,330,776,576 B) with `--cuda-graph-trace=node`, exported as sqlite under
+`profiles/nsys/audit-20260928/` (`mtp3`, `dflash7`, `pp32768`, `pp100000`). Kernel time is
+CUPTI SM time; per-round figures divide by the Q3 launch count (256 plain + 64 SwiGLU/round).
+
+**Decode rounds (tg512 fixture, `rk4v4-e8`).**
+
+| Path | MTP3 T=4 round | DFlash2 K=7 T=8 round |
+|---|---:|---:|
+| Q3 plain small-T (256/round) | 14.95 ms | 16.76 ms |
+| Q3 fused SwiGLU small-T (64/round) | 9.92 ms | 10.77 ms |
+| Q4 DFlash2 companion (37 linears + SwiGLU + draft head) | - | 5.59 ms |
+| W8 MTP layer | 2.23 ms | - |
+| Q4 main head (1/round) + Q4 draft head (3/round) | 2.79 ms | - |
+| GDN record/fold/conv/gating | ~1.3 ms | ~2.0 ms |
+| decode attention (8K) | 0.27 ms | 0.35 ms |
+| norms, adds, rope, casts | ~0.7 ms | ~0.5 ms |
+| **total** | **~32.2 ms** | **~36.3 ms** |
+
+The Q3 body is 77% (MTP3) / 76% (DFlash2 K=7) of the round and streams 9.5 GB at ~380 GB/s,
+against the 664 GB/s read rate the Q4 draft head reaches on the same card. T=2..8 is ~187 us on
+34816x5120 (T-flat); T=1 is 173 us; **T=9..16 falls back to the 32x64 staged tile at 407-438 us**
+(2.2-2.3x), so DFlash2 K>7 and any wide n-gram window currently pay that route.
+
+**Prefill passes (`--prefill-chunk` default / 2688).**
+
+| Path | pp32768 | pp100000 chunk 2688 |
+|---|---:|---:|
+| Q3 A8 tall GEMM | 10.13 s (70.6%) | 29.29 s (49.0%) |
+| prompt INT8 attention | 3.02 s (21.0%) | 25.17 s (42.1%) |
+| GDN (state_passing, wy_wu, output, conv, gating) | ~0.7 s | ~2.5 s |
+| A8 activation quantize | 0.13 s | 1.02 s |
+| norms, adds, casts | ~0.2 s | ~1.1 s |
+
+**The A8 tall GEMM is not DRAM-bound.** q3_rowsplit_tall_a8_kernel runs ~1.1 us per 64-code
+step per CTA (T=129: 648 us over 7.2 waves, 80 steps; T=513: 1370 us), i.e. ~3 GB/s per CTA,
+220 GB/s aggregate. A temporary ablation that kept only the three `ld.global.nc` code words, the
+scale load and one smem store (decode, MMA, FP32 update, activation staging, barriers removed)
+still measured 575 us at T=129 / 938 us at T=513: the load pattern itself is the wall. A
+three-slot register pipeline (two steps of code loads in flight) made it slower (690 us), so the
+throttle is not simple load latency - the per-row chunk is only 24 B at a 1920 B stride, versus
+the 96 B whole-group stages that already reach ~450 GB/s in the small-T decode kernel and the
+128 B+ rows of the Q4 draft head at 664 GB/s. The prototype was reverted; no repo change.
+
+**Ranked candidates.**
+
+1. Decode: A8 profile of the small-T kernel (half-size int8 decoded tile, m16n8k32), the lever
+   session 10 named; upper bound is the ~450 GB/s staging ceiling unless the stage width grows
+   with it (e.g. four-group 192 B stages).
+2. Decode: small-T T=9..16 route - removes the 2.2x cliff that makes DFlash2 K>7 and the
+   disabled wide n-gram verify window expensive.
+3. Decode: finish the 5c.3 corruption root cause (it is now localized to the small-T multi-split
+   E8 path - see "Wide-verify root-cause update" below); the n-gram chain and DFlash2 K=5 are
+   both gated on it and it is a tokens/round lever, not a kernel lever.
+4. Prefill: restage the A8 tall code path with whole-group cp.async (48-192 B per row) instead of
+   the 24 B register loads; a 2x kernel gain would take pp100000 from 1675 to ~2300 tok/s.
+5. Prefill: prompt attention (42% of 100K) runs at ~17-20% of tensor peak with the 5c.4 port still
+   unlanded; it is the largest untouched prefill kernel.
+6. Optional: the documented tail-aware split for the 129-513-column A8 widths (last tile is
+   nearly empty) and the GDN chunked ops (~4% at 100K).
+
+### Wide-verify root-cause update (2026-09-28, session 13)
+
+The session-7 blocker ("the configured wide window produced a wrong correction logit in one
+column; the suspect area is the assembled multi-column verify state") is **re-framed**: the
+corruption is not wide-window-specific, and the small-T INT8-family kernel's multi-split path is
+the culprit. Evidence, all on `out/qwen3_8_27b_gsq3.ninfer` with the temporary debug harness and
+dumps removed again (no repo change):
+
+- **Wide rounds are clean on BF16.** With `verify_window = ngram.max_drafts` restored in the
+  planner, `ninfer_qwen3_6_27b_ngram_real_test` (`NINFER_NGRAM_MAX_DRAFTS=6`, graphs off, BF16 KV)
+  ran **76 wide rounds with 0 n-gram-added divergences over MTP** and passed. The exact session-7
+  failing chain `[5653 1870 1137 5480 2923 16 23]` verifies correctly in isolation too.
+- **The corruption reproduces in narrow rounds, RK4V4-E8 only.** The committed table prompt (raw
+  text, the ngram test's `prompts()[3]`) with MTP (no n-gram) and `rk4v4-e8` diverges from the
+  ordinary route at generated token 314 (plain 24 vs MTP 23) at frontier 470, column 2, position
+  472: verify ids `[5480 2923 16 24]`, argmax `[2923 16 23 63]`, and the failing column's top
+  logits are `23=20.125, 22=19.0, 21=18.625, 24=17.875` while the scoring route has 24 at -0.003
+  (a wrong ordering of ~9 nats). MTP depth K=1/2/3 (widths 2/3/4) all diverge at the same token;
+  K=4/5 (widths 5/6) do not reach the state. BF16, int8 and `rk4v4` (non-E8) are clean;
+  `rk8v4` and `fp8` have their own flips at other states.
+- **The ordinary route is correct with the same cache**, so the data is representable: only the
+  verify kernel's decode of it is wrong. A per-layer hidden dump of the failing verify round
+  versus the ordinary route at the same token/position shows the hidden identical through layers
+  0-2 (GDN), a first small difference at layer 3 (first full-attention layer, rel-L2 0.0068 for
+  both BF16 and E8), then a large E8-only jump at layers 7-9 (rel-L2 0.49 against 0.009 for BF16).
+- **Forcing one split removes the corruption** (`causal_small_t_split_count` returning 1, host and
+  device agree); forcing 2 or 4 splits keeps it. Forcing the prompt route for E8 widths <= 8 also
+  removes it. Both experiments were reverted.
+- What was already ruled out still stands (attention/GDN/linear op oracles, graphs, OOB, smem
+  races). The remaining suspects are inside the small-T partial kernels' split partitioning and
+  their interaction with the fused append: each split stages keys from `first_tile` (key-tile
+  aligned) but only masks/scores its own `[split_start, split_end)` range, and only the owning
+  split writes a current token's row. The reduce kernel recomputes the same active-split count, so
+  a reducer mismatch is unlikely but not excluded.
+
+Next step to finish the explanation: compare the partial buffers (or the per-split QK scores) of
+the failing round for the split counts 1 and 8, for the one corrupted column; the E8 K-decode
+`koff` (page-relative `(key & mask) * 64 + d/4`) and the append's `k_base` are the two places to
+check against the split ranges first. Until then the wide window stays disabled and `rk4v4-e8`
+decode stays as validated by the session-4 profile - the corruption is a close-call flipper, not
+a systematic text breaker, but it must be fixed before the n-gram chain or DFlash2 K=5 are
+trusted on this KV format.
