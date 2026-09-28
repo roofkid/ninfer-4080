@@ -87,14 +87,15 @@ void rmsnorm_dynamic_grouped_conv_prepare(const Tensor& residual, const Tensor& 
  *       + I(i>0) * (base_kernel[h,1,1] + finish_delta[g,1,i,b]) * z[h,i-1,b].
  *
  * Logical shapes / supported domain:
- *   x is contiguous BF16 [C,W,B]; projection_weight is W8G32_F16S RowSplit [5120,C] with
- *   unpadded C; base_kernel is contiguous BF16 [5120,2,2] with axes [channel,tap,side];
+ *   x is contiguous BF16 [C,W,B]; projection_weight is W8G32_F16S or Q4G64_F16S RowSplit
+ *   [5120,C] with unpadded C; base_kernel is contiguous BF16 [5120,2,2] with axes
+ *   [channel,tap,side];
  *   finish_delta is contiguous BF16 [320,2,W,B]; and residual is contiguous BF16 [5120,W,B].
  *   W is in [2,16] and B in [1,8]. Position zero has no previous-tap contribution: the Op never
  * reads another request or an earlier round.
  *
  * Numeric:
- *   The oracle decodes each signed W8 value with its stored FP16 group scale and evaluates the
+ *   The oracle decodes each signed W8 or Q4 value with its stored FP16 group scale and evaluates
  *   complete formula in FP64 from represented inputs. The projection is a private intermediate;
  *   the contract does not prescribe its storage or arithmetic precision. The implementation
  *   writes the final residual in BF16.

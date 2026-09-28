@@ -65,7 +65,9 @@ enum class LinearPolicy : std::uint8_t {
  * problems register the five non-vocabulary FP8 geometries and accept every positive T. W8 also
  * problems register the five non-vocabulary FP8 geometries and accept every positive T. Q3G128_F16S
  * registers `[N,K]` in `{[14336,5120], [16384,5120], [34816,5120], [5120,6144], [5120,17408]}`
- * at every positive T. W8 also registers `[5120,25600]` at every positive T. BF16_CTRL registers
+ * at every positive T. Q4G64_F16S additionally registers the DFlash2 companion problems
+ * `[5120,4096]`, `[5120,17408]` and `[5120,25600]` at every positive T. W8 also registers
+ * `[5120,25600]` at every positive T. BF16_CTRL registers
  * `[14336,5120]`, `[5120,6144]`, and `[256,5120]` at every positive T. Text and MTP packed-weight
  * problems accept every positive column extent T. Registered Vision problems accept raw-patch P in
  * `{4,8,...,131072}` or merged-token V in `[1,32768]`; a matrix column does not inherently

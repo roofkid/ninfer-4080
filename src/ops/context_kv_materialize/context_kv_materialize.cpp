@@ -2,6 +2,7 @@
 
 #include "core/layout.h"
 #include "ops/context_kv_materialize/launch.h"
+#include "ops/context_kv_materialize/q4_launch.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -40,6 +41,23 @@ void require_weight(const Weight& weight, const char* name) {
         static_cast<std::uint64_t>(kKVSize) * static_cast<std::uint64_t>(kHidden / 32) * 2U;
     if (weight.qtype != QType::W8G32_F16S || weight.layout != QuantLayout::RowSplit ||
         weight.scale_dtype != DType::FP16 || weight.group != 32 || weight.group_size != 32 ||
+        weight.ndim != 2 || weight.n != kKVSize || weight.k != kHidden ||
+        weight.shape[0] != kKVSize || weight.shape[1] != kHidden ||
+        weight.padded_shape[0] != kKVSize || weight.padded_shape[1] != kHidden ||
+        weight.qhigh != nullptr || weight.high_plane_bytes != 0 ||
+        weight.payload_bytes < kCodeBytes + kScaleBytes || !aligned_to(weight.qdata, 16) ||
+        !aligned_to(weight.scales, 4)) {
+        throw std::invalid_argument(std::string(kOp) + ": invalid " + name);
+    }
+}
+
+void require_q4_weight(const Weight& weight, const char* name) {
+    constexpr std::uint64_t kCodeBytes =
+        static_cast<std::uint64_t>(kKVSize) * static_cast<std::uint64_t>(kHidden) / 2U;
+    constexpr std::uint64_t kScaleBytes =
+        static_cast<std::uint64_t>(kKVSize) * static_cast<std::uint64_t>(kHidden / 64) * 2U;
+    if (weight.qtype != QType::Q4G64_F16S || weight.layout != QuantLayout::RowSplit ||
+        weight.scale_dtype != DType::FP16 || weight.group != 64 || weight.group_size != 64 ||
         weight.ndim != 2 || weight.n != kKVSize || weight.k != kHidden ||
         weight.shape[0] != kKVSize || weight.shape[1] != kHidden ||
         weight.padded_shape[0] != kKVSize || weight.padded_shape[1] != kHidden ||
@@ -113,7 +131,11 @@ std::size_t context_kv_materialize_workspace_capacity_bytes(std::int32_t batch_s
                 detail::context_kv_materialize_route(columns)))
             capacity = std::max(capacity, key_scratch_capacity(columns));
     }
-    return capacity;
+    // The composed Q4 route always projects every physical column into one BF16 [1024,W*B]
+    // scratch, independent of the W8 route table.
+    return std::max(capacity, static_cast<std::size_t>(kKVSize) *
+                                static_cast<std::size_t>(max_width) *
+                                static_cast<std::size_t>(batch_size) * sizeof(std::uint16_t));
 }
 
 void context_kv_materialize(
@@ -140,18 +162,31 @@ void context_kv_materialize(
     }
     const std::int32_t padded = static_cast<std::int32_t>(layers.front().cache.padded_capacity);
     const std::int32_t lane_capacity = layers.front().cache.lane_capacity;
+    const bool q4 = layers.front().key_weight.qtype == QType::Q4G64_F16S;
     for (std::size_t index = 0; index < layers.size(); ++index) {
         const ContextKVMaterializeLayerView& layer = layers[index];
-        require_weight(layer.key_weight, "key weight");
-        require_weight(layer.value_weight, "value weight");
+        if (q4) {
+            require_q4_weight(layer.key_weight, "key weight");
+            require_q4_weight(layer.value_weight, "value weight");
+        } else {
+            require_weight(layer.key_weight, "key weight");
+            require_weight(layer.value_weight, "value weight");
+        }
         require_tensor(layer.key_norm_weight, DType::BF16, kHeadDim, 1, 1, 1, 4, "key norm weight");
         validate_cache(layer.cache, padded, lane_capacity);
     }
 
     if (envelope.max_count == 0) return;
     const int columns = envelope.max_count * batch;
-    const auto route  = detail::context_kv_materialize_route(columns);
     auto scope        = workspace.scope();
+    if (q4) {
+        const int physical_columns = width * batch;
+        Tensor scratch = workspace.alloc(DType::BF16, {kKVSize, physical_columns});
+        detail::context_kv_materialize_q4_launch(context, positions, counts, state_slots, layers,
+                                                 envelope, scratch, stream);
+        return;
+    }
+    const auto route = detail::context_kv_materialize_route(columns);
     Tensor key_scratch;
     if (detail::context_kv_materialize_uses_scratch(route))
         key_scratch = allocate_key_scratch(workspace, columns);

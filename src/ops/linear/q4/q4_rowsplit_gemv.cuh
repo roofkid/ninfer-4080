@@ -103,6 +103,13 @@ using Q4GemvR1W8DirectSchedule =
                            Q4GemvLaneMapping::PackedByte2, Q4GemvDecodeMode::ScalarInteger,
                            Q4GemvCodeTransfer::SyncVector16, Q4GemvScaleAccess::Scalar16Shuffle,
                            Cache::ca, 80, 1>;
+// The DFlash2 shapes span K values the tuned 80-group schedule cannot address; this form keeps
+// the static row ownership out of the schedule and derives the group count from K at run time.
+using Q4GemvR1W8DynamicSchedule =
+    Q4RowSplitGemvSchedule<1, 8, 16, 1, Q4GemvActivationAccess::Direct,
+                           Q4GemvLaneMapping::PackedByte2, Q4GemvDecodeMode::ScalarInteger,
+                           Q4GemvCodeTransfer::SyncVector16, Q4GemvScaleAccess::Scalar16Shuffle,
+                           Cache::ca, 0, 1>;
 
 template <class Schedule, Q4GemvScaleAccess ScaleAccess = Schedule::kScaleAccess>
 struct Q4GemvTileStorage;

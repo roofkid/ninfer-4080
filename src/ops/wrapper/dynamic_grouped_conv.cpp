@@ -1,5 +1,8 @@
 #include "ninfer/ops/dynamic_grouped_conv.h"
 
+#include "ninfer/ops/linear.h"
+#include "ops/dynamic_grouped_conv/dynamic_grouped_conv_add_finish.h"
+
 #include "ops/dynamic_grouped_conv/bf16/bf16_dynamic_grouped_conv_prepare_plan.h"
 #include "ops/dynamic_grouped_conv/w8/w8_dynamic_grouped_conv_add_plan.h"
 
@@ -72,6 +75,24 @@ void require_finish_projection_weight(const Weight& weight, std::int32_t input_r
     }
 }
 
+void require_q4_finish_projection_weight(const Weight& weight, std::int32_t input_rows) {
+    const std::uint64_t code_bytes = static_cast<std::uint64_t>(kHidden) *
+                                     static_cast<std::uint64_t>(input_rows) / 2U;
+    const std::uint64_t scale_bytes = static_cast<std::uint64_t>(kHidden) *
+                                      static_cast<std::uint64_t>(input_rows / 64U) * 2U;
+    if (weight.qtype != QType::Q4G64_F16S || weight.layout != QuantLayout::RowSplit ||
+        weight.scale_dtype != DType::FP16 || weight.group_size != 64 || weight.group != 64 ||
+        weight.ndim != 2 || weight.n != kHidden || weight.k != input_rows ||
+        weight.shape[0] != kHidden || weight.shape[1] != input_rows || weight.shape[2] != 1 ||
+        weight.shape[3] != 1 || weight.padded_shape[0] != kHidden ||
+        weight.padded_shape[1] != input_rows || weight.padded_shape[2] != 1 ||
+        weight.padded_shape[3] != 1 || weight.qhigh != nullptr || weight.high_plane_bytes != 0 ||
+        weight.payload_bytes < code_bytes + scale_bytes || !aligned_to(weight.qdata, 16) ||
+        !aligned_to(weight.scales, 4)) {
+        throw std::invalid_argument("linear dynamic grouped conv add: invalid projection_weight");
+    }
+}
+
 struct Range {
     const void* pointer;
     std::size_t bytes;
@@ -94,10 +115,16 @@ bool overlaps(const Range& lhs, const Range& rhs) {
 void require_finish_nonoverlap(const Tensor& x, const Weight& projection_weight,
                                const Tensor& base_kernel, const Tensor& finish_delta,
                                const Tensor& residual, const WorkspaceArena& workspace) {
+    const bool q4_weight = projection_weight.qtype == QType::Q4G64_F16S;
     const std::size_t code_bytes =
-        static_cast<std::size_t>(kHidden) * static_cast<std::size_t>(x.ne[0]);
-    const std::size_t scale_bytes = static_cast<std::size_t>(kHidden) *
-                                    static_cast<std::size_t>(x.ne[0] / 32) * sizeof(std::uint16_t);
+        q4_weight ? static_cast<std::size_t>(kHidden) * static_cast<std::size_t>(x.ne[0]) / 2U
+                  : static_cast<std::size_t>(kHidden) * static_cast<std::size_t>(x.ne[0]);
+    const std::size_t scale_bytes =
+        q4_weight
+            ? static_cast<std::size_t>(kHidden) * static_cast<std::size_t>(x.ne[0] / 64) *
+                  sizeof(std::uint16_t)
+            : static_cast<std::size_t>(kHidden) * static_cast<std::size_t>(x.ne[0] / 32) *
+                  sizeof(std::uint16_t);
     const std::array<Range, 7> ranges{{
         {x.data, x.bytes(), "x"},
         {projection_weight.qdata, code_bytes, "projection codes"},
@@ -213,6 +240,18 @@ void linear_dynamic_grouped_conv_add(const Tensor& x, const Weight& projection_w
     require_tensor(finish_delta, DType::BF16, kGroups, kTaps, width, batch_size, kAddOp,
                    "finish_delta");
     require_tensor(residual, DType::BF16, kHidden, width, batch_size, 1, kAddOp, "residual");
+    if (projection_weight.qtype == QType::Q4G64_F16S) {
+        require_q4_finish_projection_weight(projection_weight, input_rows);
+        require_finish_nonoverlap(x, projection_weight, base_kernel, finish_delta, residual,
+                                  workspace);
+        auto scope       = workspace.scope();
+        const std::int32_t tokens = width * batch_size;
+        Tensor projected = workspace.alloc(DType::BF16, {kHidden, tokens});
+        linear(x.view({input_rows, tokens}), projection_weight, projected, stream);
+        detail::dynamic_conv_add_finish_launch(projected, base_kernel, finish_delta, residual,
+                                               width, stream);
+        return;
+    }
     require_finish_projection_weight(projection_weight, input_rows);
     require_finish_nonoverlap(x, projection_weight, base_kernel, finish_delta, residual, workspace);
 

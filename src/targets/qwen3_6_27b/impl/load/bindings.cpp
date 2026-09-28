@@ -447,15 +447,23 @@ void bind_qwen38_nvfp4_text_layers(artifact::Binder& binder, BindingPlan& out) {
     }
 }
 
-DFlash2Plan bind_dflash2(artifact::Binder& binder, artifact::TensorPlacement placement) {
+// The companion matrices follow the artifact identity: the 16 GB gsq3 profile requantizes them to
+// Q4G64_F16S, and every other profile keeps the stock W8G32_F16S words.
+NumericFormat dflash2_matrix_format(WeightsProfile weights_profile) {
+    return weights_profile == WeightsProfile::Qwen38Gsq3 ? NumericFormat::Q4G64_F16S
+                                                         : NumericFormat::W8G32_F16S;
+}
+
+DFlash2Plan bind_dflash2(artifact::Binder& binder, artifact::TensorPlacement placement,
+                         NumericFormat matrix_format) {
     const auto bind_tensor = [&](std::string_view name, NumericFormat format,
                                  std::initializer_list<std::uint64_t> shape) {
         return artifact::bind_tensor(binder, name, format, shape, placement);
     };
 
     DFlash2Plan out;
-    out.feature_projection = bind_weight(binder, "dflash2/feature_projection",
-                                         NumericFormat::W8G32_F16S, {5120, 25600}, placement);
+    out.feature_projection = bind_weight(binder, "dflash2/feature_projection", matrix_format,
+                                         {5120, 25600}, placement);
     out.context_norm       = bind_tensor("dflash2/context_norm", NumericFormat::BF16, {5120});
     for (std::size_t layer = 0; layer < out.layers.size(); ++layer) {
         DFlash2LayerPlan& target = out.layers[layer];
@@ -467,12 +475,12 @@ DFlash2Plan bind_dflash2(artifact::Binder& binder, artifact::TensorPlacement pla
             bind_weight(binder, prefix + "attention_conv/kernel_projection", NumericFormat::BF16,
                         {1280, 5120}, placement);
         target.query_key_value = bind_weight(binder, prefix + "attention/query_key_value",
-                                             NumericFormat::W8G32_F16S, {6144, 5120}, placement);
+                                             matrix_format, {6144, 5120}, placement);
         target.query_norm =
             bind_tensor(prefix + "attention/query_norm", NumericFormat::BF16, {128});
         target.key_norm = bind_tensor(prefix + "attention/key_norm", NumericFormat::BF16, {128});
         target.attention_output = bind_weight(binder, prefix + "attention/output",
-                                              NumericFormat::W8G32_F16S, {5120, 4096}, placement);
+                                              matrix_format, {5120, 4096}, placement);
         target.post_attention_norm =
             bind_tensor(prefix + "post_attention_norm", NumericFormat::BF16, {5120});
         target.mlp_conv.base_kernel =
@@ -480,10 +488,10 @@ DFlash2Plan bind_dflash2(artifact::Binder& binder, artifact::TensorPlacement pla
         target.mlp_conv.kernel_projection =
             bind_weight(binder, prefix + "mlp_conv/kernel_projection", NumericFormat::BF16,
                         {1280, 5120}, placement);
-        target.gate_up = bind_weight(binder, prefix + "mlp/gate_up", NumericFormat::W8G32_F16S,
-                                     {34816, 5120}, placement);
-        target.down    = bind_weight(binder, prefix + "mlp/down", NumericFormat::W8G32_F16S,
-                                     {5120, 17408}, placement);
+        target.gate_up = bind_weight(binder, prefix + "mlp/gate_up", matrix_format, {34816, 5120},
+                                     placement);
+        target.down    = bind_weight(binder, prefix + "mlp/down", matrix_format, {5120, 17408},
+                                     placement);
     }
     out.final_norm = bind_tensor("dflash2/final_norm", NumericFormat::BF16, {5120});
     out.candidate_selector.hidden_projection =
@@ -604,7 +612,7 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_
         const artifact::TensorPlacement placement = features.dflash2()
                                                         ? artifact::TensorPlacement::Device
                                                         : artifact::TensorPlacement::ValidateOnly;
-        out.dflash2                               = bind_dflash2(binder, placement);
+        out.dflash2 = bind_dflash2(binder, placement, dflash2_matrix_format(weights_profile));
     }
 
     load_plan.materialization = binder.finish();

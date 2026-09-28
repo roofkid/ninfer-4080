@@ -70,6 +70,18 @@ Q4Launch select_q4_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
             return launch_q4_mma_r64_c128;
         }
         break;
+    case 4096:
+    case 17408:
+    case 25600:
+        // DFlash2 companion matrices: feature projection [5120,25600], attention output
+        // [5120,4096], and MLP down [5120,17408] share the 5120-row hidden width.
+        if (n == 5120) {
+            if (t == 1) { return launch_q4_gemv_r1_w8_dynamic; }
+            if (t <= 7) { return launch_q4_simt_r8_c4; }
+            if (t <= 16) { return launch_q4_simt_r8_c8; }
+            return launch_q4_mma_r64_c128;
+        }
+        break;
     case 1152:
         if (t < 4 || t > 131072 || (t % 4) != 0) { break; }
         switch (n) {

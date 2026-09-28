@@ -59,6 +59,35 @@ void require_w8_rowsplit(const Weight& weight, std::int32_t rows, std::int32_t h
     }
 }
 
+void require_q4_rowsplit(const Weight& weight, std::int32_t rows, std::int32_t hidden,
+                         const char* label) {
+    if (weight.qtype != QType::Q4G64_F16S || weight.layout != QuantLayout::RowSplit ||
+        weight.scale_dtype != DType::FP16 || weight.group_size != 64 || weight.group != 64 ||
+        weight.ndim != 2 || weight.n != rows || weight.k != hidden || weight.shape[0] != rows ||
+        weight.shape[1] != hidden || weight.padded_shape[0] != rows ||
+        weight.padded_shape[1] != hidden || weight.qhigh != nullptr ||
+        weight.high_plane_bytes != 0 || !aligned_to(weight.qdata, 16) ||
+        !aligned_to(weight.scales, 4)) {
+        throw std::invalid_argument(std::string("attn_input_proj: invalid ") + label);
+    }
+}
+
+Weight grouped_row_view(const Weight& weight, std::int32_t row_begin, std::int32_t row_count) {
+    const std::uint64_t groups = static_cast<std::uint64_t>(weight.padded_shape[1]) /
+                                 static_cast<std::uint64_t>(weight.group);
+    const std::uint64_t base_row_bytes = groups * weight.group_size / 2U;
+    const std::uint64_t scale_row_bytes = groups * 2U;
+    Weight out = weight;
+    out.qdata  = static_cast<const std::uint8_t*>(weight.qdata) +
+                static_cast<std::uint64_t>(row_begin) * base_row_bytes;
+    out.scales = static_cast<const std::uint8_t*>(weight.scales) +
+                 static_cast<std::uint64_t>(row_begin) * scale_row_bytes;
+    out.n               = row_count;
+    out.shape[0]        = row_count;
+    out.padded_shape[0] = row_count;
+    return out;
+}
+
 void require_q3_rowsplit(const Weight& weight, std::int32_t rows, const char* label) {
     if (weight.qtype != QType::Q3G128_F16S || weight.layout != QuantLayout::RowSplit ||
         weight.scale_dtype != DType::FP16 || weight.group_size != 128 || weight.group != 128 ||
@@ -301,6 +330,19 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_value_weight, Tens
     require_matrix(q, kQRows, cols, "q");
     require_matrix(k, kKvRows, cols, "k");
     require_matrix(v, kKvRows, cols, "v");
+    if (query_key_value_weight.qtype == QType::Q4G64_F16S) {
+        if (hidden != 5120) {
+            throw std::invalid_argument("attn_input_proj: Q4 Q/K/V is a DFlash2 profile");
+        }
+        require_q4_rowsplit(query_key_value_weight, kRows, hidden, "query/key/value weight");
+        // The Q4 companion projects each group independently; the three row views preserve the
+        // stored query/key/value order and need no packed parent or transient buffer.
+        linear(x, grouped_row_view(query_key_value_weight, 0, kQRows), q, stream);
+        linear(x, grouped_row_view(query_key_value_weight, kQRows, kKvRows), k, stream);
+        linear(x, grouped_row_view(query_key_value_weight, kQRows + kKvRows, kKvRows), v,
+               stream);
+        return;
+    }
     require_w8_rowsplit(query_key_value_weight, kRows, hidden, "query/key/value weight");
 
     detail::w8_attn_input_dispatch(x, query_key_value_weight, q, k, v, stream);

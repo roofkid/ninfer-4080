@@ -463,7 +463,8 @@ int run_w8_target() {
 }
 
 int run_w8_qkv_case(DevicePackedWeight& parent, std::int32_t hidden, const char* profile,
-                    std::int32_t tokens, bool graph_replay = false, int sample_rows = 7) {
+                    std::int32_t tokens, bool graph_replay = false, int sample_rows = 7,
+                    const char* dtype = "W8") {
     constexpr int kQRows = 4096, kKvRows = 1024;
     std::vector<float> activation  = make_bf16_activation(hidden, tokens, 301U + tokens);
     auto activation_bits           = bf16_bits(activation);
@@ -503,7 +504,7 @@ int run_w8_qkv_case(DevicePackedWeight& parent, std::int32_t hidden, const char*
         else
             launch();
         cuda_synchronize(stream);
-        const std::string suffix = " W8 " + std::string(profile) +
+        const std::string suffix = " " + std::string(dtype) + " " + std::string(profile) +
                                    " A16 T=" + std::to_string(tokens) +
                                    (graph_replay ? " graph phase=" + std::to_string(phase) : "");
         failures += verify_output("attn q" + suffix, query, parent.host, 0, kQRows, activation,
@@ -545,6 +546,20 @@ int run_w8_dflash2() {
     return failures;
 }
 
+int run_q4_dflash2() {
+    constexpr int kHidden = 5120;
+    DevicePackedWeight parent(
+        quantized_weight::make_patterned_weight(QType::Q4G64_F16S, 6144, kHidden, 317U));
+    int failures = 0;
+    for (int tokens = 1; tokens <= 16; ++tokens)
+        failures += run_w8_qkv_case(parent, kHidden, "DFlash2", tokens, false, 7, "Q4");
+    for (int tokens : {17, 32, 64, 128})
+        failures += run_w8_qkv_case(parent, kHidden, "DFlash2", tokens, false, 7, "Q4");
+    for (int tokens : {1, 8, 16, 128})
+        failures += run_w8_qkv_case(parent, kHidden, "DFlash2", tokens, true, 31, "Q4");
+    return failures;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -569,6 +584,7 @@ int main(int argc, char** argv) {
         failures += run_w8_companion();
     }
     failures += run_w8_dflash2();
+    failures += run_q4_dflash2();
     std::cout << (failures == 0 ? "OK" : "FAIL") << " attn_input_proj\n";
     return failures == 0 ? 0 : 1;
 }

@@ -2,6 +2,7 @@
 #include "core/device.h"
 #include "ops/linear/w8/w8_config.h"
 #include "ops/linear/w8/w8_launch.h"
+#include "ops/dynamic_grouped_conv/dynamic_grouped_conv_add_finish.h"
 #include "ops/linear/w8/w8_rowsplit_output.cuh"
 #include "ops/linear/w8/w8_small_t_mma.cuh"
 #include <cuda_bf16.h>
@@ -12,20 +13,7 @@
 
 namespace ninfer::ops::detail {
 namespace {
-constexpr int kRows = 5120, kGroups = 320;
-
-__device__ __forceinline__ void finish_value(int row, int col, int width, float current,
-                                             float previous, const __nv_bfloat16* base,
-                                             const __nv_bfloat16* delta, __nv_bfloat16* residual) {
-    const int index = col * kRows + row, di = col * 2 * kGroups + row / 16;
-    float value = fmaf(__bfloat162float(base[2 * kRows + row]) + __bfloat162float(delta[di]),
-                       current, __bfloat162float(residual[index]));
-    if (col % width != 0)
-        value =
-            fmaf(__bfloat162float(base[3 * kRows + row]) + __bfloat162float(delta[di + kGroups]),
-                 previous, value);
-    residual[index] = __float2bfloat16_rn(value);
-}
+constexpr int kRows = 5120;
 
 using Launch = W8Launch;
 
@@ -77,15 +65,6 @@ constexpr auto make_launchers(std::index_sequence<I...>) {
 constexpr auto attention = make_launchers<4096>(std::make_index_sequence<11>{});
 constexpr auto mlp       = make_launchers<17408>(std::make_index_sequence<11>{});
 
-__global__ void finish_kernel(const __nv_bfloat16* projected, const __nv_bfloat16* base,
-                              const __nv_bfloat16* delta, __nv_bfloat16* residual, int width) {
-    const int row = blockIdx.x * blockDim.x + threadIdx.x, col = blockIdx.y;
-    if (row >= kRows) return;
-    const int index = col * kRows + row;
-    finish_value(row, col, width, __bfloat162float(projected[index]),
-                 col % width ? __bfloat162float(projected[index - kRows]) : 0.0f, base, delta,
-                 residual);
-}
 
 void materialized(W8DynamicConvAddSchedule schedule, const Tensor& x, const Weight& weight,
                   const Tensor& base, const Tensor& delta, Tensor& residual, Tensor& projected,
@@ -103,12 +82,7 @@ void materialized(W8DynamicConvAddSchedule schedule, const Tensor& x, const Weig
         launch_w8_mma_r64x32_c64_k128_a1(flat, weight, result, stream);
         break;
     }
-    const dim3 grid((kRows + 255) / 256, tokens);
-    finish_kernel<<<grid, 256, 0, stream>>>(static_cast<const __nv_bfloat16*>(projected.data),
-                                            static_cast<const __nv_bfloat16*>(base.data),
-                                            static_cast<const __nv_bfloat16*>(delta.data),
-                                            static_cast<__nv_bfloat16*>(residual.data), x.ne[1]);
-    CUDA_CHECK(cudaGetLastError());
+    dynamic_conv_add_finish_launch(projected, base, delta, residual, x.ne[1], stream);
 }
 } // namespace
 

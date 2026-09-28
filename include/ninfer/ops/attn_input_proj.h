@@ -84,13 +84,18 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_gate_value_weight,
                      Tensor& gate, Tensor& k, Tensor& v, cudaStream_t stream);
 
 /**
- * Three-output W8 specialization. The W8G32_F16S RowSplit parent stores rows in order
- * [query 4096, key 1024, value 1024]. Registered parent forms are [6144,2048] with BF16
- * x [2048,T] for the Qwen3.6 companion and [6144,5120] with BF16 x [5120,T] for DFlash2.
- * q is contiguous BF16 [4096,T], and k/v are contiguous BF16 [1024,T]. Every route writes the
- * three independent final allocations directly; no parent output or transient workspace is
- * materialized. T may be any positive value. Q and K remain raw projection outputs: this Op does
- * not normalize or rotate either tensor.
+ * Three-output Q/K/V specialization for the Qwen3.6 and DFlash2 companions. The parent stores
+ * rows in order [query 4096, key 1024, value 1024]. Registered parent forms are:
+ *
+ * - W8G32_F16S RowSplit [6144,2048] with BF16 x [2048,T] for the Qwen3.6 companion;
+ * - W8G32_F16S RowSplit [6144,5120] with BF16 x [5120,T] for the DFlash2 companion;
+ * - Q4G64_F16S RowSplit [6144,5120] with BF16 x [5120,T] for the requantized DFlash2
+ *   companion, which projects the three stored row views through three qualified Linear calls.
+ *
+ * q is contiguous BF16 [4096,T], and k/v are contiguous BF16 [1024,T]. Every W8 route writes
+ * the three independent final allocations directly; the Q4 form needs no transient workspace
+ * either. T may be any positive value. Q and K remain raw projection outputs: this Op does not
+ * normalize or rotate either tensor.
  */
 void attn_input_proj(const Tensor& x, const Weight& query_key_value_weight, Tensor& q, Tensor& k,
                      Tensor& v, cudaStream_t stream);

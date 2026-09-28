@@ -558,9 +558,16 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                         auto mlp = layout.scope();
                         prepare();
                         matrix(layout, DType::BF16, DFlashConfig::intermediate, tokens);
-                        scratch(layout, ops::linear_swiglu_workspace_capacity_bytes(
-                                            QType::W8G32_F16S, 2 * DFlashConfig::intermediate,
-                                            DFlashConfig::hidden, tokens, tokens));
+                        // The gsq3 companion runs the Q4 gate/up route whose materialized column
+                        // region needs a transient; the stock W8 profile needs none. Plan both
+                        // registered companion formats and take the larger requirement.
+                        scratch(layout,
+                                std::max(ops::linear_swiglu_workspace_capacity_bytes(
+                                             QType::Q4G64_F16S, 2 * DFlashConfig::intermediate,
+                                             DFlashConfig::hidden, tokens, tokens),
+                                         ops::linear_swiglu_workspace_capacity_bytes(
+                                             QType::W8G32_F16S, 2 * DFlashConfig::intermediate,
+                                             DFlashConfig::hidden, tokens, tokens)));
                         scratch(layout,
                                 ops::linear_dynamic_grouped_conv_add_workspace_capacity_bytes(
                                     DFlashConfig::intermediate, width, width, batch, batch));

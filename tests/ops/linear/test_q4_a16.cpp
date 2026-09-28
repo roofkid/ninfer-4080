@@ -61,6 +61,27 @@ int q4_a16_conformance() {
     failures += run_shape("Q4_A16", ActivationCompute::A16, make_q4g64_f16s_weight,
                           {248320, 5120, 149U, Comparison::Sampled, false, kN248320K5120});
 
+    // DFlash2 companion geometries: attention output [5120,4096], MLP down [5120,17408], and
+    // feature projection [5120,25600]. T=1 and the small column region drive decode catch-up
+    // and the proposal round; T=128/2048 exercise the wide conv-add and prefill routes.
+    constexpr std::array kN5120K4096{
+        a16(1), a16(2), a16(4), a16(7), a16(8), a16(16), a16(17), a16(128),
+    };
+    failures += run_shape("Q4_A16", ActivationCompute::A16, make_q4g64_f16s_weight,
+                          {5120, 4096, 151U, Comparison::Sampled, false, kN5120K4096});
+
+    constexpr std::array kN5120K17408{
+        a16(1), a16(2), a16(4), a16(7), a16(8), a16(16), a16(17), a16(128),
+    };
+    failures += run_shape("Q4_A16", ActivationCompute::A16, make_q4g64_f16s_weight,
+                          {5120, 17408, 157U, Comparison::Sampled, false, kN5120K17408});
+
+    constexpr std::array kN5120K25600{
+        a16(1), a16(2), a16(4), a16(7), a16(8), a16(16), a16(17), a16(128), a16(2048),
+    };
+    failures += run_shape("Q4_A16", ActivationCompute::A16, make_q4g64_f16s_weight,
+                          {5120, 25600, 163U, Comparison::Sampled, false, kN5120K25600});
+
     constexpr std::array kN131072K2048{
         a16(1),   a16(2),   a16(8),   a16(9),   a16(16),  a16(17),  a16(20),  a16(21),  a16(32),
         a16(33),  a16(48),  a16(49),  a16(56),  a16(57),  a16(63),  a16(64),  a16(65),  a16(72),
