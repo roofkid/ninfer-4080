@@ -6,6 +6,7 @@
 #include "ops/linear/q3/q3_dispatch.h"
 #include "ops/linear/q3/q3_launch.h"
 #include "ops/linear/q3/q3_rowsplit_gemv_staged.cuh"
+#include "ops/linear/q3/q3_rowsplit_small_t_mma.cuh"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -86,6 +87,12 @@ void q3_linear_swiglu_dispatch(const Tensor& x, const Weight& w, Tensor& out,
         return;
     }
     if (columns <= kGemvColumns) {
+        // The single-token decode keeps the fused GEMV; the wider widths use the small-T
+        // tensor-core route: whole-group staging and tensor-core multiplies at several CTAs/SM.
+        if (columns >= 2 && (w.k % 8) == 0 && (w.padded_shape[1] % q3_small_t::kGroupK) == 0) {
+            launch_q3_mma_small_t_swiglu_r16_c8(x, w, out, stream);
+            return;
+        }
         const dim3 grid(
             static_cast<unsigned>((kOutputRows + q3_gemv_staged::kWarpsPerCta - 1) /
                                    q3_gemv_staged::kWarpsPerCta),

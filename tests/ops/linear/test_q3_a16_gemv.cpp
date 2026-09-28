@@ -98,19 +98,26 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
             compare_route(label + " staged", x, weight, n, t,
                           ops::detail::launch_q3_gemv_r8_c8_staged, expected);
 
-        GuardedDeviceBuffer dispatch_output(static_cast<std::size_t>(n) * t * sizeof(std::uint16_t));
-        Tensor dispatch(dispatch_output.data(), DType::BF16, {n, t});
-        ops::linear(x, weight, dispatch, nullptr);
-        test::cuda_check(cudaStreamSynchronize(nullptr), "synchronize dispatched route");
-        failures += dispatch_output.verify_guards(label + " dispatched route");
-        std::vector<std::uint16_t> dispatched(static_cast<std::size_t>(n) * t);
-        dispatch_output.copy_to_host(dispatched.data(), dispatched.size() * sizeof(std::uint16_t));
-        if (dispatched != expected) {
-            const auto mismatch = std::mismatch(dispatched.begin(), dispatched.end(),
-                                                expected.begin(), expected.end());
-            const std::size_t index = static_cast<std::size_t>(mismatch.first - dispatched.begin());
-            std::cerr << label << " dispatched: byte mismatch at index " << index << '\n';
-            ++failures;
+        // The one-token dispatch is the GEMV route; widths 2..8 take the small-T tensor-core
+        // route, whose own suite covers them against the oracle.
+        if (t == 1) {
+            GuardedDeviceBuffer dispatch_output(
+                static_cast<std::size_t>(n) * t * sizeof(std::uint16_t));
+            Tensor dispatch(dispatch_output.data(), DType::BF16, {n, t});
+            ops::linear(x, weight, dispatch, nullptr);
+            test::cuda_check(cudaStreamSynchronize(nullptr), "synchronize dispatched route");
+            failures += dispatch_output.verify_guards(label + " dispatched route");
+            std::vector<std::uint16_t> dispatched(static_cast<std::size_t>(n) * t);
+            dispatch_output.copy_to_host(dispatched.data(),
+                                         dispatched.size() * sizeof(std::uint16_t));
+            if (dispatched != expected) {
+                const auto mismatch = std::mismatch(dispatched.begin(), dispatched.end(),
+                                                    expected.begin(), expected.end());
+                const std::size_t index =
+                    static_cast<std::size_t>(mismatch.first - dispatched.begin());
+                std::cerr << label << " dispatched: byte mismatch at index " << index << '\n';
+                ++failures;
+            }
         }
     }
     return failures;

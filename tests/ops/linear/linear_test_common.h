@@ -47,6 +47,11 @@ using WeightGenerator = quantized_weight::PackedWeight (*)(std::int32_t, std::in
 
 quantized_weight::PackedWeight make_q3g128_f16s_weight(std::int32_t n, std::int32_t k,
                                                       std::uint32_t seed);
+// The same Q3 weight with normal-range multipliers: the default fixture's tiny scales make every
+// code * scale product exact in BF16, so a route that rounds its decoded weights to BF16 would
+// pass without ever exercising a rounding.
+quantized_weight::PackedWeight make_q3g128_f16s_unit_weight(std::int32_t n, std::int32_t k,
+                                                           std::uint32_t seed);
 quantized_weight::PackedWeight make_q4g64_f16s_weight(std::int32_t n, std::int32_t k,
                                                       std::uint32_t seed);
 quantized_weight::PackedWeight make_q5g64_f16s_weight(std::int32_t n, std::int32_t k,

@@ -29,5 +29,10 @@ void launch_q3_mma_tall_a8_r128_c128(const A8G64Activation& act, const Weight& w
                                      cudaStream_t stream);
 void launch_q3_mma_tall_a8_swiglu_r64_c128(const A8G64Activation& act, const Weight& w,
                                            Tensor& out, cudaStream_t stream);
-
+// Small-T tensor-core routes: 32 weight rows x up to 8 tokens per CTA over whole-group
+// staged codes, several CTAs per SM and an eight-warp K-split.
+void launch_q3_mma_small_t_r32_c8(const Tensor& x, const Weight& w, Tensor& out,
+                                  cudaStream_t stream);
+void launch_q3_mma_small_t_swiglu_r16_c8(const Tensor& x, const Weight& w, Tensor& out,
+                                         cudaStream_t stream);
 } // namespace ninfer::ops::detail

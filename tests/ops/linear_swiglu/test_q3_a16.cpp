@@ -19,8 +19,17 @@ int main() {
             "LinearSwiGLU Q3_A16",
             {QType::Q3G128_F16S, 34816, 5120, 17408, 1501U, ActivationCompute::A16},
             kTokenCases, std::array<std::int32_t, 4>{1, 9, 65, 128});
-        std::cout << (failures == 0 ? "OK" : "FAIL") << " LinearSwiGLU Q3_A16 correctness\n";
-        return failures == 0 ? 0 : 1;
+        // Normal-range multipliers exercise the BF16 weight rounding the fused small-T route
+        // performs and the default fixture's tiny scales never reach.
+        constexpr std::array<std::int32_t, 5> kUnitScaleTokens{1, 2, 4, 6, 8};
+        const int unit_failures = run_profile(
+            "LinearSwiGLU Q3_A16 unit scales",
+            {QType::Q3G128_F16S, 34816, 5120, 17408, 1601U, ActivationCompute::A16,
+             ninfer::test::quantized_weight::RowSplitScalePattern::Unit},
+            kUnitScaleTokens);
+        std::cout << (failures + unit_failures == 0 ? "OK" : "FAIL")
+                  << " LinearSwiGLU Q3_A16 correctness\n";
+        return failures + unit_failures == 0 ? 0 : 1;
     } catch (const std::exception& error) {
         std::cerr << "LinearSwiGLU Q3_A16 test failed: " << error.what() << '\n';
         return 1;

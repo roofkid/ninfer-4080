@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/tensor.h"
+#include "ops/quantized_weight.h"
 
 #include <cstdint>
 #include <span>
@@ -21,6 +22,10 @@ struct Profile {
     std::int32_t output_rows;
     std::uint32_t seed;
     ActivationCompute activation_compute;
+    // The fixture's default "Small" multipliers are tiny powers of two whose code * scale
+    // products are exact in BF16; the Unit pattern is the normal-range control.
+    quantized_weight::RowSplitScalePattern row_split_scale =
+        quantized_weight::RowSplitScalePattern::Small;
 };
 
 int run_profile(std::string_view label, const Profile& profile,

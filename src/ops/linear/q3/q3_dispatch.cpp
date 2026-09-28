@@ -14,23 +14,33 @@ bool a8_shape_eligible(std::int32_t n, std::int32_t k, std::int32_t padded_k) no
 
 } // namespace
 
-Q3Launch select_q3_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
+Q3Launch select_q3_a16_launch(std::int32_t n, std::int32_t k, std::int32_t padded_k,
+                             std::int32_t t) {
     if (n <= 0 || k <= 0 || t <= 0) { throw std::invalid_argument("q3 linear: unsupported shape or T"); }
-    // Decode and MTP widths use the warp-per-row GEMV; prefill uses the pipelined tall engine and
-    // its 64-token tile through T=127; the staged 32x64 tile serves the narrow remainder and the
-    // shapes the tall engine does not own.
-    if (t <= 8) { return launch_q3_gemv_r8_c8_staged; }
+    // The one-token decode keeps the warp-per-row GEMV (it is ~8% faster there) and the wider
+    // decode/MTP verify widths use the small-T tensor-core route when the geometry fits it (whole
+    // 32-row blocks, whole 256-code stages, no byte-misaligned activation rows); otherwise the
+    // GEMV. Prefill uses the pipelined tall engine and its 64-token tile through T=127; the
+    // staged 32x64 tile serves the narrow remainder and the shapes the tall engine does not own.
+    if (t <= 8) {
+        if (t >= 2 && (n % kQ3SmallTRows) == 0 && (k % 8) == 0 && padded_k >= k &&
+            (padded_k % kQ3SmallTStepK) == 0) {
+            return launch_q3_mma_small_t_r32_c8;
+        }
+        return launch_q3_gemv_r8_c8_staged;
+    }
     if (n % 128 == 0 && t >= 64) {
         return t >= 128 ? launch_q3_mma_tall_r128_c128 : launch_q3_mma_tall_r128_c64;
     }
     return launch_q3_mma_r32_c64;
 }
 
-Q3Launch select_q3_launch(std::int32_t n, std::int32_t k, std::int32_t t, LinearPolicy policy) {
+Q3Launch select_q3_launch(std::int32_t n, std::int32_t k, std::int32_t padded_k, std::int32_t t,
+                          LinearPolicy policy) {
     switch (policy) {
     case LinearPolicy::A16Only:
     case LinearPolicy::AllowA8:
-        return select_q3_a16_launch(n, k, t);
+        return select_q3_a16_launch(n, k, padded_k, t);
     case LinearPolicy::AllowA4:
         break;
     }
@@ -69,7 +79,8 @@ void q3_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy pol
         launch_q3_mma_tall_a8_r128_c128(act, w, out, stream);
         return;
     }
-    const Q3Launch launch = select_q3_launch(w.n, w.k, x.ne[1], policy);
+    const Q3Launch launch =
+        select_q3_launch(w.n, w.k, static_cast<std::int32_t>(w.padded_shape[1]), x.ne[1], policy);
     launch(x, w, out, stream);
 }
 

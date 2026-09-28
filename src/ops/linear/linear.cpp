@@ -126,8 +126,10 @@ std::size_t linear_workspace_capacity_bytes(QType qtype, std::int32_t output_row
         (void)detail::select_q4_launch(output_rows, input_rows, max_tokens, policy);
         return 0;
     case QType::Q3G128_F16S:
-        (void)detail::select_q3_launch(output_rows, input_rows, min_tokens, policy);
-        (void)detail::select_q3_launch(output_rows, input_rows, max_tokens, policy);
+        // The padded-K extent is not visible here; both Q3 A16 routes need no workspace, so the
+        // logical K is passed and any disagreement only selects a workspace-free route.
+        (void)detail::select_q3_launch(output_rows, input_rows, input_rows, min_tokens, policy);
+        (void)detail::select_q3_launch(output_rows, input_rows, input_rows, max_tokens, policy);
         // The A8 activation is the only Q3 transient, and its size grows with the width. The
         // padded-K question is not visible here; a padded weight falls back to A16 in dispatch
         // and only over-reserves.

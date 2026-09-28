@@ -276,6 +276,8 @@ int run_profile(std::string_view label, const Profile& profile,
     if (profile.qtype == QType::NVFP4) {
         weight_options.weight_scale_divisor = 0.125F;
         weight_options.input_scale_divisor  = 3.5F;
+    } else {
+        weight_options.row_split_scale = profile.row_split_scale;
     }
     quantized_weight::PackedWeight host_weight = quantized_weight::make_patterned_weight(
         profile.qtype, profile.gate_up_rows, profile.input_rows, profile.seed, weight_options);
