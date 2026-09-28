@@ -4,7 +4,7 @@
 feasibility session on `rtx4090-port`. It is a temporary plan, not a permanent reference: delete it
 when the work is finished or abandoned (AGENTS.md, "Change consistency").
 
-**Progress (2026-09-27, sessions 6–9): Stages 0–5 are recorded, and Stages 5c.1 and 5c.2 are
+**Progress (2026-09-27, sessions 6–10): Stages 0–5 are recorded, and Stages 5c.1 and 5c.2 are
 complete with their engine numbers measured.** Stage 4's gate passed on the 4080: the 100K + vision + MTP3
 profile
 validates memory before listening, the retrieval and vision probes are exact, MTP3 acceptance at
@@ -50,7 +50,10 @@ tall GEMM at T=129..513, `pp32768` 1406.34 -> 2277.53 tok/s, `pp100000 --prefill
 unchanged (tg512 53.2-53.9 tok/s, same acceptance). The same kernel at T<=8 is slower than the
 staged small-T GEMV (377-420 us against 174-264 us on 34816x5120), so A8 was **not** enabled at
 decode widths and the decode prize still needs a dedicated small-T tensor-core design; details
-and the measured cause are in §11.
+and the measured cause are in §11. **Session 10 landed the small-T bf16 MMA decode route the audit
+named**: T=2..8 and the fused gate/up from two columns on, 106.7 tok/s on the tg512 fixture,
+71.9 tok/s on the real CLI scenario against 55.4, and 102.9 tok/s at 98K depth; §11 records the
+design, the measured schedule space, and the A8 follow-up.
 
 Environment for this plan: the `Dockerfile.dev` image in this repository. It is the sandbox the
 maintainer hands to pi, with the host RTX 4080 passed through:
@@ -699,13 +702,16 @@ DFlash2 on the 4080; multi-lane and preemption; the 5090 tree; Windows.
 5. Delete this file when the work is done or abandoned, and move the durable outcome into the
    artifact reference, the model card, and the port ledger.
 6. If the task is the remaining performance work, read **Stage 5c** first. 5c.1 and 5c.2
-   (session 9, §11) are complete: the Q3 A8 prefill route takes 32K to 2277.53 and 100K
+   (sessions 6 and 9, §11) are complete: the Q3 A8 prefill route takes 32K to 2277.53 and 100K
    `--prefill-chunk 2688` to 1675.39 tok/s with the quality anchor unchanged (4.596095 quick).
-   Decode is unchanged because the same kernel loses to the staged A16 GEMV at T<=8, so that
-   axis still needs a dedicated small-T tensor-core design (whole-group staging, more CTAs per
-   SM); 5c.3 remains gated on the wide-verify corruption, and Stage 6 publication is otherwise
-   unblocked. 5c.5 (DFlash2) is a conditional candidate only: it does not fit the 100K profile
-   as converted and is gated on the 5c.3 wide-verify fix (§6).
+   Session 10 then landed the decode axis the audit named: the dedicated small-T bf16 MMA route
+   (whole-group staging, three-CTA staging ring, eight-warp K-split) replaces the staged GEMV
+   from T=2 through T=8 and the fused gate/up variant from two columns on, taking the shallow
+   CLI scenario 55.4 -> 71.9 tok/s and the depth sweep 59.4 -> 102.9 tok/s at 98K (same
+   acceptance on the real scenario). 5c.3 remains gated on the wide-verify corruption, Stage 6
+   publication is otherwise unblocked, and the identified next decode lever is the A8 profile
+   of the new kernel (§11). 5c.5 (DFlash2) is a conditional candidate only: it does not fit the
+   100K profile as converted and is gated on the 5c.3 wide-verify fix (§6).
 
 ## 11. Stage log
 
@@ -1274,3 +1280,100 @@ several times the plane; the staged GEMV avoids this by staging whole 48-byte gr
 (whole-group staging, more CTAs per SM, K-split) rather than the tall tile, and none of that is
 committed. The audit's ~1.6x projection holds only if the consume dominates; at these widths
 the staging, not the consume, is the remaining wall.
+
+### Q3 small-T bf16 MMA decode route (2026-09-27, session 10)
+
+**Landed.** The audit's and the A8 measurement's identified next step: a dedicated small-T
+tensor-core route, not a threshold change on an existing one.
+
+- `src/ops/linear/q3/q3_rowsplit_small_t_mma.{cuh,cu}`: 32 weight rows x up to 8 token columns
+  per CTA, K walked in 256-code (two-group) stages. Every 48-byte 128-code group is copied with
+  16-byte `cp.async` vectors (whole-group staging); three staging buffers carry each stage's
+  codes, activation and scales together and the loop issues two stages ahead; the eight warps
+  split each stage into two 16-code slices, and their partials are reduced once per CTA. The
+  decoded BF16 tile reuses the tall engine's `chunk ^ (row & 7)` swizzle for its ldmatrix A
+  reads. `StageTokens` is 4 or 8: four activation rows need about 32 KiB per CTA and keep three
+  CTAs per SM, eight rows need about 38 KiB and keep two.
+- `q3_dispatch.cpp`: T=1 keeps the staged GEMV (~8% faster there), T=2..8 select the small-T
+  route when N is a whole number of 32-row blocks, K is a multiple of 8, and the padded K is a
+  whole number of 256-code stages; every other width is unchanged. `q3_linear_swiglu.cu`
+  selects the fused gate/up variant from two columns on by the same facts.
+
+**Semantics.** Each thread decodes one 12-byte quarter (32 codes) of one 128-code group into the
+same `float(code) * float(scale)` -> single BF16 rounding the A16 tall routes use, and every
+FP32 accumulator takes one m16n8k16 MMA per 16-wide K slice. The K-split partials are added once
+at the end, so the accumulation order differs from the warp-per-row GEMV; the registered A16
+criterion is the authority for both routes.
+
+**Correctness evidence.** New `ninfer_linear_q3_a16_small_t_test`: route boundaries (T=1/2/8/9, a
+padded *logical* tail that still fits whole 256-code stages, and a K whose padding stops at a
+whole 128-code group, which keeps the GEMV), plus the shared FP64 oracle through the public
+dispatch with the fixture's **Unit** scale pattern on `[1024,5120]` T=1..9, the
+`[34816,5120]` gate_up shape at T=1/2/4/6/8, and the padded `[4096,4304]` shape at T=2/4/8.
+The Unit pattern is the point of the suite: the default Q3 fixture's "Small" multipliers are
+tiny powers of two whose `code * scale` products are all exactly representable in BF16, so a
+route that rounds its decoded weights to BF16 passes the existing oracle without ever
+exercising that rounding. The new linear and swiglu Unit-scale cases close that gap. All Q3
+suites pass (`linear`, `swiglu`, `linear_add`, `gemv`, `tall`) and the full `ctest` is clean:
+131 tests, 118 passed, 13 expected skips, 0 failed.
+
+**Op bench** (`34816x5120`, cold L2, median us; CSV
+`profiles/bench/5c-small-t-mma/q3_34816x5120.csv`; the small-T column is the same kernel the
+dispatch selects from T=2):
+
+| T | staged GEMV | small-T MMA | change |
+|---:|---:|---:|---:|
+| 1 | 169.0 | 184.3 | +9.1% (route not taken) |
+| 2 | 194.6 | 186.4 | -4.2% |
+| 3 | 225.3 | 186.4 | -17.3% |
+| 4 | 257.0 | 188.4 | -26.7% |
+| 5 | 288.8 | 180.2 | -37.6% |
+| 6 | 323.6 | 180.2 | -44.3% |
+| 7 | 359.4 | 181.2 | -49.6% |
+| 8 | 393.2 | 181.3 | -53.9% |
+
+The route comparison is `profiles/bench/5c-small-t-mma/session10-route-comparison.txt` (both
+routes launched directly on the same real shape, medians of 30).
+
+**Engine.** All figures on the pinned artifact, `rk4v4-e8`, MTP3 `--lm-head-draft`.
+
+- `tg512` (the fixture the earlier sessions used): **53.67 -> 106.69 tok/s**; acceptance
+  0.3991 -> 0.7873 over 152 rounds instead of 233 (log
+  `session10-tg512.log`). The acceptance move is a trajectory change of that degenerate fixture
+  (generation from BOS on the tiled corpus), not a quality claim; the plain `linear` and the
+  fused swiglu routes are both oracle-valid, and the real workloads below do not move.
+- CLI code scenario (`examples/cli/messages/scenario_code_python.json`, greedy, thinking off,
+  64 tokens): **55.4 -> 71.9 tok/s** at 43.2% -> 43.8% acceptance (27 rounds both; run
+  `session10-code-cli.{out,err}`).
+- Depth sweep at `--prefill-chunk 1024` (tiled corpus, so acceptance is a fixture property):
+  8K 124.9 tok/s, 32K 117.95, 98K 102.89 (the session-9 depth table recorded 66.6 / 64.7 / 59.4
+  with the same corpus and flags). Prefill is unchanged (8192 2687.34, 32768 2272.84,
+  98304 1610.39 tok/s).
+
+**Where the remaining decode time goes (probe attribution, now deleted).** On `34816x5120`,
+T=4: the code stream alone takes ~150 us (66.8 MB at ~460 GB/s), the decode adds ~25 us and the
+MMAs ~10 us, against a ~100 us floor at the card's 664 GB/s read rate. The measured schedule
+space that did not beat the landed one: direct B-fragment loads from L2 instead of an activation
+tile (+19 us, the loads are uncoalesced 2-byte accesses), a five-deep code-only ring (the stream
+stays at ~450 GB/s, so the limit is not memory-level parallelism), a two-CTA three-buffer ring
+(-3 us over the landed design, within noise), and a two-row-block tile (the decode item count no
+longer matches the CTA width). The identified next lever is the A8 profile for this kernel:
+half-size decoded tiles (int8), a ~2.5x cheaper code decode, and m16n8k32 MMAs, at the cost of
+the documented activation quantization and its separate launch; it is not committed.
+
+Commands behind the numbers (`out/qwen3_8_27b_gsq3.ninfer`, 2026-09-27, RTX 4080):
+
+```bash
+./build/bench/ninfer_linear_bench --qtype Q3 --n 34816 --k 5120 --sweep 1:9:1   --warmup 10 --repeat 20 --csv-out profiles/bench/5c-small-t-mma/q3_34816x5120.csv
+./build/bench/ninfer_bench --weights out/qwen3_8_27b_gsq3.ninfer -n 512 --spec mtp   --draft-tokens 3 --lm-head-draft --max-ctx 8192 --kv-dtype rk4v4-e8 --warmup 1 -r 1
+./build/apps/ninfer out/qwen3_8_27b_gsq3.ninfer \
+  --messages examples/cli/messages/scenario_code_python.json --max-context 8192 --max-new 64 \
+  --kv-dtype rk4v4-e8 --spec mtp --draft-tokens 3 --lm-head-draft --no-thinking
+./build/bench/ninfer_bench --weights out/qwen3_8_27b_gsq3.ninfer \
+  --corpus profiles/bench/bench_corpus_131072.ids --kv-dtype rk4v4-e8 --max-ctx 102400 \
+  -pg 8192,128\;32768,128\;98304,128 --spec mtp --draft-tokens 3 --lm-head-draft \
+  --prefill-chunk 1024 --warmup 1 -r 1
+```
+
+The baseline figures in this section were re-measured on the same card and build flags with the
+changes stashed (`git stash`), so they are not the session-9 logs.
