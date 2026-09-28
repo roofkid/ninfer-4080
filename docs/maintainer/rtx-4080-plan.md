@@ -53,7 +53,11 @@ decode widths and the decode prize still needs a dedicated small-T tensor-core d
 and the measured cause are in §11. **Session 10 landed the small-T bf16 MMA decode route the audit
 named**: T=2..8 and the fused gate/up from two columns on, 106.7 tok/s on the tg512 fixture,
 71.9 tok/s on the real CLI scenario against 55.4, and 102.9 tok/s at 98K depth; §11 records the
-design, the measured schedule space, and the A8 follow-up.
+design, the measured schedule space, and the A8 follow-up. **Session 11 landed the DFlash2
+companion in the artifact and its K=7 profile** (greedy-lossless, ~93 tok/s shallow and
+203/180 tok/s at 28K/56K depth against MTP3's 118/~112) at the stock-companion caps of 28K
+context with vision and 56K without, with the requantized companion (option 4) as the next step
+(§11).
 
 Environment for this plan: the `Dockerfile.dev` image in this repository. It is the sandbox the
 maintainer hands to pi, with the host RTX 4080 passed through:
@@ -65,6 +69,11 @@ docker run --rm -it --gpus all \
   -v "$PWD:/work" -v "$HOME/ninfer-models:/models" \
   ninfer-4080-dev:pi
 ```
+
+For daily serving rather than development, `scripts/run-ninfer-4080.bat` (Windows host) and
+`scripts/run-ninfer-4080.sh` build the product `Dockerfile` image and start the served 100K MTP3
+profile with the artifact bind-mounted read-only; the dev container above stays the build and
+measurement environment.
 
 Resume by reading this file top to bottom, then running §10.
 
@@ -629,6 +638,11 @@ quality gate before any default change". Nothing about DFlash2 is trustworthy un
 column corruption is explained, and the memory question above needs a decision before the converter
 work starts. Until then this stays a candidate, not a stage.
 
+**Session-11 outcome:** the artifact half is landed (stock companion, verified), and DFlash2 K=7 -
+the window users are expected to run - is greedy-lossless and measured at the caps in §11. The
+pre-existing K=5 divergence is reproduced on the old Q3 GEMV route as well and is deferred; the
+requantized companion (the memory decision) is the next step.
+
 **Open questions for the maintainer.**
 
 - **A8 permission (session-6 finding; recommendation).** In this tree the artifact carries no
@@ -710,8 +724,10 @@ DFlash2 on the 4080; multi-lane and preemption; the 5090 tree; Windows.
    CLI scenario 55.4 -> 71.9 tok/s and the depth sweep 59.4 -> 102.9 tok/s at 98K (same
    acceptance on the real scenario). 5c.3 remains gated on the wide-verify corruption, Stage 6
    publication is otherwise unblocked, and the identified next decode lever is the A8 profile
-   of the new kernel (§11). 5c.5 (DFlash2) is a conditional candidate only: it does not fit the
-   100K profile as converted and is gated on the 5c.3 wide-verify fix (§6).
+   of the new kernel (§11). 5c.5 (DFlash2) is past its artifact gate: session 11 (§11) landed the
+   companion in the GSQ3 identity and its K=7 profile at 28K (vision) / 56K (text) context, which
+   is greedy-lossless; the next step is the requantized companion for the 100K profile
+   (option 4), and the pre-existing K=5 narrow-window divergence is documented and deferred.
 
 ## 11. Stage log
 
@@ -1377,3 +1393,59 @@ Commands behind the numbers (`out/qwen3_8_27b_gsq3.ninfer`, 2026-09-27, RTX 4080
 
 The baseline figures in this section were re-measured on the same card and build flags with the
 changes stashed (`git stash`), so they are not the session-9 logs.
+
+### DFlash2 companion and the K=7 profile (2026-09-28, session 11)
+
+**Landed.** The 5c.5 artifact half: the GSQ3 identity now carries the DFlash2 companion, and the
+engine runs it on the 4080 with a reduced context.
+
+- `tools/convert/qwen3_8_27b/inventory_gsq3.py` adds the shared 66-object `DFLASH2_TENSOR_SPECS`
+  (21 `W8G32_F16S` matrices, 45 BF16 norms/convolutions/selector codebooks) exactly as the
+  groupwise-int identity does; `recipe_gsq3.py` folds the shared companion recipes into its one
+  recipe table; `convert_gsq3.py` takes `--dflash2-model` (config validation, base compatibility,
+  source inventory of 66 recipes / 81 tensors, and the companion writer);
+  `verify_gsq3.py` verifies the companion against its own checkpoint (all 45 BF16 objects
+  word-for-word, the 21 W8 matrices on representative rows against an independent re-quantization).
+- Converted and fully verified artifact `out/qwen3_8_27b_gsq3.ninfer`:
+  **14,249,918,976 bytes, 1190 objects**, body unchanged (packed 323/323 base bytes equal,
+  323/323 scales, 218 rounded, max error 2.98e-8), companion 45 direct + 21 quantized objects
+  clean. Python suites: `tests/convert` + `tests/artifact` 89 passed, 5 skipped. Full `ctest`:
+  131 tests, 118 passed, 13 expected skips, 0 failed.
+- Engine: `ninfer_qwen3_8_27b_dflash2_real_test` passes at K=3/4/5/6/7/15 with B=1, CUDA graphs
+  and the optimized selector, including its greedy-vs-ordinary identity check. B=8 needs
+  6.1 GB of runtime reservation and does not fit this 16 GB card.
+
+**The K=7 profile (what to use).** DFlash2 K=7 verifies 8 tokens, the widest window the session-10
+small-T tensor-core route covers at full speed, and it is greedy-lossless on the real scenario
+(256-token code generation md5-identical to MTP3: `54c59149db5f`).
+
+| Workload | DFlash2 K=7 | MTP3 |
+|---|---:|---:|
+| CLI code scenario, 256 greedy tokens | 93.4 tok/s (35.7% acc) | 94.1 tok/s (71.4%) |
+| depth 8K / 28K / 56K decode | 122.5 / 203.5 / 180.2 | 124.9 / 118.0 / ~112 |
+| depth prefill | 2656 / 2309 / 1947 | 2687 / 2273 / 1610 |
+
+The tiled-corpus depth rows accept nearly everything (a fixture property), so the wide window pays
+off there; shallow greedy is at parity. Measured fit with the stock companion (RK4V4-E8):
+
+- **57,344-token context without vision** (56K): 12.56 GiB weights, 1.80 GiB runtime reservation,
+  636 MiB free after startup, 69 MiB planned slack. 61,440 fails by 70 MiB.
+- **28,672 with vision** (28K): 12.8 GiB weights, 1.50 GiB runtime reservation, 525 MiB free,
+  122 MiB planned slack. 30,720 fails by 16 MiB.
+
+Launchers: `scripts/run-ninfer-4080-dflash2.{bat,sh}` (K=7, `NINFER_VISION=1` selects the 28K
+vision cap, `NINFER_CONTEXT` overrides); the MTP launcher keeps the 100K profile.
+
+**The K=5 caveat (deferred, pre-existing).** Greedy DFlash2 K=5 on the code scenario diverges from
+ordinary decoding (`2eb9e160cb96` against MTP3's `54c59149db5f`), and it reproduces with the Q3
+small-T route forced off (`c539ce307cc3`), so it is a pre-existing DFlash2 wide-verify issue of the
+5c.3 symptom class, not the session-10 kernel. K=3, 4, 6, 7 and 15 pass the real identity test; the
+tg512 fixture's DFlash2 acceptance collapses at K=5/K=7 (13.9% / 21.0% against K=3's 66.9%) while
+the real workloads do not. K=7 is the priority window and is unaffected; do not chase K=5 before it
+matters.
+
+**Next (option 4).** Requantizing the companion (Q4G64 matrices -0.86 GiB, int8 selector -0.12 GiB)
+buys roughly 50K tokens at the same safety margin, i.e. about 78K with vision and 100K+ without,
+and needs the `bind_dflash2` format acceptance, the two fused DFlash2 leaves
+(`w8_dflash2_linear_swiglu`, `w8_dflash2_attn_input`) or their Q4 peers, and a draft-quality gate
+against the stock companion.
