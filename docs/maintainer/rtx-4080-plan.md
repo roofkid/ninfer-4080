@@ -80,6 +80,17 @@ independent nearest-E8 projectors; see "RK4V4E8 executed-path correction" at the
 settings int8 diverges by 20.97 nats and rk4v4-e8 by 6.75 where bf16 stays at 0.5, so the
 shared quantized-KV small-T path is the target; see the control measurement at the end of §11.**
 
+**Session 15 (2026-09-29) closed the 5c.3 blocker as trajectory sensitivity, not a defect: the
+gross quantized-KV flips reproduce from a bf16-ulp-level route difference at one position that
+grows to 8-14 nats over ~270 greedy steps in bf16 as well as int8, at a position where the
+decode and prefill states agree to bf16 ulp and the op oracle passes. It also landed the plan's
+named next step: the RK4V4E8 host codec + FP64 oracle + append byte parity in
+`tests/ops/softmax_attention/causal_cache.cpp`, and the rotated-V double-rounding fix that suite
+demands (`787766f`) for rk4v4/rk4v4-e8/rk2v4-e8, which the shipping 100K profile uses. Full
+`ctest` is 132/119/13/0 and the `rk4v4-e8` n-gram real route passes. See the two session-15
+sections at the end of §11. The wide-window re-enable and the pre-existing K=5 divergence are now
+maintainer decisions, not open investigations.**
+
 Environment for this plan: the `Dockerfile.dev` image in this repository. It is the sandbox the
 maintainer hands to pi, with the host RTX 4080 passed through:
 
@@ -754,6 +765,10 @@ DFlash2 on the 4080; multi-lane and preemption; the 5090 tree; Windows.
    which puts the K=7 profile at 100,000 tokens text-only / 65,536 with vision at the same safety
    margin with unchanged-or-better decode. The 8-bit selector codebook is option 4's last slice;
    the pre-existing K=5 narrow-window divergence is documented and deferred.
+   Session 15 (§11) closed the wide-verify blocker as trajectory sensitivity rather than a kernel
+   defect, landed the RK4V4E8 oracle coverage + the rotated-V double-rounding fix, and left the
+   wide-window re-enable and DFlash2 K=5 as maintainer calls. The landed work is uncommitted in the
+   working tree until the maintainer asks for a commit.
 
 ## 11. Stage log
 
@@ -1160,6 +1175,9 @@ prefix), or (b) drop the n-gram feature if the wide path is not worth it, since 
 without it. Do not re-enable wide rounds before the corruption is explained. **Session 13
 partially answered (a): the corruption is not wide-window-specific and the small-T multi-split
 E8 path is the culprit; see "Wide-verify root-cause update" below.**
+**Session 15 answered (a) completely: the flips are the amplification of bf16-ulp route
+differences and reproduce in bf16 as well as int8; see the session-15 section at the end of §11. The
+wide window itself is not the cause and can be re-enabled as a maintainer decision.**
 
 ### Decode bandwidth audit (2026-09-27, session 7 follow-up)
 
@@ -1471,6 +1489,9 @@ small-T route forced off (`c539ce307cc3`), so it is a pre-existing DFlash2 wide-
 tg512 fixture's DFlash2 acceptance collapses at K=5/K=7 (13.9% / 21.0% against K=3's 66.9%) while
 the real workloads do not. K=7 is the priority window and is unaffected; do not chase K=5 before it
 matters.
+**Session 15 update:** the divergence is the trajectory-sensitivity class described at the end of
+§11, and the rotated-V double-rounding fix landed in session 15 changes this path's numerics. The
+K=5 window remains deferred until it matters.
 
 ### DFlash2 Q4 companion (2026-09-28, session 12)
 
@@ -1567,9 +1588,9 @@ the 96 B whole-group stages that already reach ~450 GB/s in the small-T decode k
    with it (e.g. four-group 192 B stages).
 2. Decode: small-T T=9..16 route - removes the 2.2x cliff that makes DFlash2 K>7 and the
    disabled wide n-gram verify window expensive.
-3. Decode: finish the 5c.3 corruption root cause (it is now localized to the small-T multi-split
-   E8 path - see "Wide-verify root-cause update" below); the n-gram chain and DFlash2 K=5 are
-   both gated on it and it is a tokens/round lever, not a kernel lever.
+3. Decode: ~~finish the 5c.3 corruption root cause~~ **DONE (session 15): the flips are
+   trajectory sensitivity, not a defect — see the session-15 section at the end of §11.** The
+   n-gram wide window and DFlash2 K=5 are now maintainer calls, not blocked investigations.
 4. Prefill: restage the A8 tall code path with whole-group cp.async (48-192 B per row) instead of
    the 24 B register loads; a 2x kernel gain would take pp100000 from 1675 to ~2300 tok/s.
 5. Prefill: prompt attention (42% of 100K) runs at ~17-20% of tensor peak with the 5c.4 port still
@@ -1619,6 +1640,10 @@ check against the split ranges first. Until then the wide window stays disabled 
 decode stays as validated by the session-4 profile - the corruption is a close-call flipper, not
 a systematic text breaker, but it must be fixed before the n-gram chain or DFlash2 K=5 are
 trusted on this KV format.
+
+**Superseded by session 15:** the corruption is trajectory sensitivity, not a split/append/codec
+defect; see "Wide-verify root cause: trajectory sensitivity" at the end of §11. The wide window
+can be re-enabled as a maintainer decision under the existing bf16 tie criterion.
 
 ### RK4V4E8 executed-path correction (2026-09-28, session 14)
 
@@ -1705,3 +1730,68 @@ NINFER_TEST_ARTIFACT=out/qwen3_8_27b_gsq3.ninfer NINFER_NGRAM_KV_DTYPE=int8 \
 NINFER_TEST_ARTIFACT=out/qwen3_8_27b_gsq3.ninfer NINFER_NGRAM_KV_DTYPE=rk4v4-e8 \
   ./build/tests/ninfer_qwen3_6_27b_ngram_real_test
 ```
+
+### Wide-verify root cause: trajectory sensitivity, not a kernel defect (2026-09-29, session 15)
+
+**The session-13/14 "column corruption" is explained.** It is not a defect in the small-T split
+path, the fused append, the E8 codec or the wide verify window: greedy decoding under a lossy
+KV cache is chaotically sensitive to bf16-ulp-level state differences, and the flips are the
+amplification of those differences, not a corrupted memory or logit. The evidence, all on
+`out/qwen3_8_27b_gsq3.ninfer`:
+
+- **A reproducible single-prompt int8 case.** `ninfer_qwen3_6_27b_ngram_real_test` with
+  `NINFER_NGRAM_ONLY`-style single-prompt reduction (prompt 3, 286 new greedy tokens) picks
+  4277 at generated token 285 while the same engine's *scoring* route rates 4277 at -20.97 nats
+  and 5480 at -0.0004. A fresh prefill of the identical 444-token prefix then decode gives 5480,
+  and bf16 incremental decode also gives 5480.
+- **Position bisect.** Feeding the correct prefix up to position k and decoding the rest
+  incrementally: k = 13/14/15 corrupt (4277 at position 443), k = 16 clean (5480 at 26.75,
+  4277 at 9.56). The runs differ only in whether position 174 was computed by a T=1 decode or
+  by the 175-token prefill chunk. At position 174 the two routes agree to bf16 ulp: logits
+  max-diff 0.31, normed-hidden cosine 0.9995, same argmax 5787. That single ulp-level difference
+  becomes an 8-14 nat logit difference at 443 **in bf16 too** (5480: 28.12 vs 19.88, max logit
+  diff 10.6), only bf16's flip does not cross the decision boundary while int8's does.
+- **The same-position KV caches differ only from the appended position onward.** All 32
+  K/V plane byte differences between the decode and prefill runs start at byte offset 142848 =
+  page 2, offset 46, dim 0 — exactly the token appended at position 174. Nothing before it differs
+  (prefixes are bit-identical), and the difference is the rounding of that token's inputs.
+- **Op-level qualification passes at the failing class.** `ninfer_softmax_attention_test`'s
+  int8 `{7, 467, 512}`/`{8, 467, 512}` cases (a1/a3, fused append and cache read) pass against the
+  FP64 oracle, including new width-1/2/4 cases at windows 441-445 added for this investigation
+  (removed again). Forcing the prompt route for every decode step (`causal_attention_resolve_route`
+  override, also removed) left the int8 reference output bit-identical over 384 tokens, and forcing
+  the split capacity to 1 moved the gross flips elsewhere rather than removing the class.
+
+**Consequence.** The wide n-gram verify window does not corrupt anything by itself; it perturbs
+the trajectory like any other width/partition change. The 5c.3 wide window can be re-enabled as a
+maintainer decision: the bf16 tie criterion remains the contracting test, and quantized-KV
+divergences should stay report-only. The same explanation covers DFlash2 K=5 and the E8 gross gap.
+
+### Rotated-V double rounding fix and the RK4V4E8 oracle port (2026-09-29, session 15)
+
+The plan's named next step: port the fork's `8b202c4` RK4V4E8 host codec + FP64 oracle + fused/
+standalone append byte parity into `tests/ops/softmax_attention/causal_cache.cpp`, and the fix its
+own 46 failures demand (`787766f`). Landed:
+
+- **Test coverage** (the missing committed coverage): `test_cache_layout`, `HostCache`, the H64
+  butterfly encoder, nearest-E8 projection, `make_cache`/`append_cache`/`cache_value`, the rotated
+  ideal-attention (H64 on Q and on the output), `DeviceCache` upload/snapshot/verify with
+  byte-exact K and V parity, `verify_cache`, `cache_name`, `attention_criterion`, the a1 fused/
+  standalone append parity, RK4V4E8 in the shared geometry, batch and DFlash2 sweeps, a new
+  `run_rk4v4e8_cases()` (T=1/T=13 at 8K and 128K), a new `--rk4v4-e8-only` entry and the
+  `ninfer_softmax_attention_rk4v4_e8_test` ctest case.
+- **Fix**: rotated-V caches (rk4v4, rk4v4-e8, rk2v4-e8) wrote the attention output in the H64
+  domain in bf16 and a second kernel rotated it back, adding a second bf16 rounding. The small-T
+  reduce and the prompt i8 epilogue now apply the inverse H64 to the FP32 result before the only
+  BF16 rounding; the separate `kv_cache_inverse_rotate_output_kernel` launch is removed.
+- **Evidence**: with the port and without the fix the new suite fails the reduction criterion by
+  about one bf16 ulp across many cases (e.g. actual -1.02344 vs reference -1.01909); with the fix
+  it passes. Full `ctest`: **132 tests, 119 passed, 13 expected skips, 0 failed** (was 131/118/13/0).
+  Real routes: the n-gram real test on `rk4v4-e8` passes (4 divergences over 1263 tokens, one
+  7-nat gross flip on prompt 2 — consistent with the trajectory-sensitivity explanation above),
+  and the DFlash2 K=3/7/15 B=1 integration test passes unchanged (that binary uses its default
+  bf16 KV, so it is a regression check, not E8 coverage).
+- **Impact**: the E8 decode output is now closer to the FP64 oracle by ~1 bf16 ulp, and one kernel
+  launch per attention call is removed. The suite's codec-quality report for this artifact's
+  shape is rel_rmse 0.102 (the E8 store itself). The `ninfer-perplexity` weight-quality anchor
+  is unaffected (int8 prompt attention).
