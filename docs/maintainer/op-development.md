@@ -434,12 +434,11 @@ of its complete affected domain; one failing implementation is not sufficient ju
 
 ### 6.4 Documented activation quantization: Q3 A8
 
-The Q3G128_F16S RowSplit prefill GEMMs (the plain `linear` and the folded gate/up `linear_swiglu`)
-have an A8 profile whose activation quantization is part of the Op contract rather than a
-private choice. When the policy grants `AllowA8`, the width is at least 129 columns, K is an
-exact multiple of 64, and the stored padded K equals K, the Op computes, for each token and
-64-column group of `x` (half of the weights' 128-value group, whose one FP16 scale serves both
-halves):
+The Q3G128_F16S RowSplit GEMMs (the plain `linear` and the folded gate/up `linear_swiglu`) have
+an A8 profile whose activation quantization is part of the Op contract rather than a private
+choice. When the policy grants `AllowA8`, K is an exact multiple of 64, and the stored padded K
+equals K, the Op computes, for each token and 64-column group of `x` (half of the weights'
+128-value group, whose one FP16 scale serves both halves):
 
 - `amax = max |x|`, `scale = amax / 127`, `q = rint(x * (127 / amax))` clamped to `[-127, 127]`,
   in IEEE FP32 with round-to-nearest-even; an all-zero group has scale 0 and codes 0
@@ -447,14 +446,18 @@ halves):
 - every weight code `c` in `[-4, 3]` is an exact int8 MMA operand, so each 64-code group's
   integer dot product `d_g = sum(c * q)` is exact in int32;
 - the output is `sum_g (w_scale_128(g / 2) * scale_g) * d_g` with one FP32 product per group and
-  one fused multiply-add per group in ascending K, before the Op's single BF16 output rounding.
+  one fused multiply-add per group before the Op's single BF16 output rounding. The tall engine
+  walks the groups in ascending K; the small-T engine gives every warp one 64-code group of each
+  512-code stage and reduces the eight per-warp partials once, so the group order inside a warp
+  is ascending and the final sum is a partial tree.
 
-Narrower widths (decode, MTP and DFlash2 verification, batched decode) and padded-K problems
-keep the A16 routes, and `A16Only` weights never quantize. The oracle of this profile applies
-exactly that quantization to the represented activation (`tests/ops/a8_g64_reference.h`) and
-multiplies it with the independently decoded weights in FP64, so only FP32 accumulation and the
-output rounding remain and the A16 criterion still applies. Its suites straddle the 129-column
-boundary, one and several token tiles, and the padded-K fallback.
+Two route families serve the profile: the tall engine for widths of at least 129 columns and the
+small-T engine for 2..16 columns. The single-token decode, the 17..128 window, padded-K
+problems and `A16Only` weights keep the A16 routes. The oracle of this profile applies exactly
+that quantization to the represented activation (`tests/ops/a8_g64_reference.h`) and multiplies
+it with the independently decoded weights in FP64, so only FP32 accumulation and the output
+rounding remain and the A16 criterion still applies. Its suites straddle the route boundaries,
+one and several token tiles, and the padded-K fallback.
 ## 7. Performance evidence
 
 An Op microbenchmark measures the public semantic operation at an exact shape, format, layout,

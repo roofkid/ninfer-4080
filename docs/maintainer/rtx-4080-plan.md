@@ -89,7 +89,13 @@ named next step: the RK4V4E8 host codec + FP64 oracle + append byte parity in
 demands (`787766f`) for rk4v4/rk4v4-e8/rk2v4-e8, which the shipping 100K profile uses. Full
 `ctest` is 132/119/13/0 and the `rk4v4-e8` n-gram real route passes. See the two session-15
 sections at the end of §11. The wide-window re-enable and the pre-existing K=5 divergence are now
-maintainer decisions, not open investigations.**
+maintainer decisions, not open investigations. **Session 16 (2026-09-30) closed the session-13
+audit's two decode candidates: the small-T tensor-core route now covers 9..16 columns with one
+CTA per 8-column tile (DFlash2 K=15 39.6 -> 53.0 tok/s on the CLI scenario), and an A8 profile of
+the same engine serves 2..16 columns with the documented activation quantization (op level
+-15..-17% against A16, greedy engine +10..13%, DFlash2 K=7/K=15 texts byte-identical). §11 has the
+design, the fixed group-major scale-staging bug, and the MTP3 near-tie drift that the decode A8
+profile introduces.**
 
 Environment for this plan: the `Dockerfile.dev` image in this repository. It is the sandbox the
 maintainer hands to pi, with the host RTX 4080 passed through:
@@ -757,9 +763,14 @@ DFlash2 on the 4080; multi-lane and preemption; the 5090 tree; Windows.
    (whole-group staging, three-CTA staging ring, eight-warp K-split) replaces the staged GEMV
    from T=2 through T=8 and the fused gate/up variant from two columns on, taking the shallow
    CLI scenario 55.4 -> 71.9 tok/s and the depth sweep 59.4 -> 102.9 tok/s at 98K (same
-   acceptance on the real scenario). 5c.3 remains gated on the wide-verify corruption, Stage 6
-   publication is otherwise unblocked, and the identified next decode lever is the A8 profile
-   of the new kernel (§11). 5c.5 (DFlash2) is past its artifact gate: session 11 (§11) landed the
+   acceptance on the real scenario). Session 16 (§11) then landed the two decode levers the
+   session-13 audit ranked: the small-T route now serves 9..16 columns (one CTA per 8-column tile;
+   DFlash2 K=15 39.6 -> 53.0 tok/s) and an A8 profile of the same engine serves 2..16 columns
+   (op level -15..-17%, greedy engine +10..13%, DFlash2 K=7/K=15 texts byte-identical). The decode
+   A8 profile changes decode numerics by design and the MTP3 greedy text drifts one phrase at a
+   near-tie, which is the one open maintainer call. 5c.3 remains gated on the wide-verify
+   corruption, Stage 6 publication is otherwise unblocked, and 5c.5 (DFlash2) is past its artifact
+   gate: session 11 (§11) landed the
    companion in the GSQ3 identity and its K=7 profile at 28K (vision) / 56K (text) context, which
    is greedy-lossless; session 12 (§11) then requantized the companion matrices to Q4G64_F16S,
    which puts the K=7 profile at 100,000 tokens text-only / 65,536 with vision at the same safety
@@ -1795,3 +1806,70 @@ own 46 failures demand (`787766f`). Landed:
   launch per attention call is removed. The suite's codec-quality report for this artifact's
   shape is rel_rmse 0.102 (the E8 store itself). The `ninfer-perplexity` weight-quality anchor
   is unaffected (int8 prompt attention).
+
+### Small-T 9..16-column route and the A8 small-T decode engine (2026-09-30, session 16)
+
+Both decode items the session-13 audit ranked first and second are landed. No artifact changed and
+nothing is committed.
+
+**1. The small-T tensor-core route now covers 9..16 columns (ranked candidate 2).**
+`q3_rowsplit_small_t_mma.{cuh,cu}` launches one CTA per (row block, 8-column token tile), token
+tile fastest in the grid, and the `Problem::emit` writes the tile's token offset. The dispatch
+sends T=2..16 to the small-T engine and keeps the A16 staged 32x64 tile for 17..127 (the tall
+engine takes over at 64 columns for whole 128-row blocks). The folded SwiGLU route covers 2..16
+the same way, and `q3_linear_swiglu_workspace_capacity_bytes` now reserves the chunked FP32 plane
+only for 17..63. `test_q3_a16_small_t.cpp` pins the new boundaries and runs the FP64 oracle across
+T=1..16 on the registered parents; `test_q3_a16_tall.cpp` keeps its staged byte-equality check for
+the widths the staged/tall engines own (T>16).
+
+- Op bench `34816x5120` (cold L2, median us; baseline = the staged 32x64 route at the start of the
+  session): T=9..14 437 -> 328, T=15/16 326-328 (CSV
+  `profiles/bench/5c-decode-levers/tiles_a16_34816x5120.csv`). The residual 1.75x against the
+  T<=8 rate (187 us) is the second tile's duplicated code staging; a native 16-column CTA would
+  need a half-size decoded tile or a two-buffer ring to keep two CTAs resident per SM.
+- Engine (CLI 256 sampled tokens, `examples/cli/messages/scenario_code_python.json`): MTP3 69.7
+  and DFlash2 K=7 99.8 unchanged (their verify widths are 4 and 8), DFlash2 K=15 **39.6 -> 53.0**
+  tok/s with the round at 60 ms against 84 ms. Logs
+  `profiles/bench/5c-decode-levers/tiles_cli_*.log`.
+
+**2. The A8 profile of the small-T engine (ranked candidate 1).** New
+`src/ops/linear/q3/q3_rowsplit_small_t_a8_mma.{cuh,cu}` and the shared
+`q3_rowsplit_a8_codec.cuh` (the tall A8 engine now takes its decode helpers from there). One CTA
+owns 32 weight rows and one 8-column token tile; a stage is **512 codes** (four 128-code weight
+groups = eight 64-code activation groups), so each of the eight warps owns exactly one activation
+group per stage and everything a group needs — its int8 decoded A tile step and its activation B
+step — comes from one 64-byte step of the stage. Whole-stage codes (192 B/row), weight scales, the
+quantized activation and its group scales are staged with cp.async into a three-buffer ring; every
+thread decodes two 12-byte quarters into an int8 tile with the tall engine's 64-byte swizzle;
+m16n8k32 s8 MMAs seed each group sum with the integer magic and recover the exact int32 `d_g` with
+one FADD; the per-group FP32 product and fma plus the A16 engine's eight-way partial reduction
+produce the output. `q3_uses_a8` admits 2..16 columns for exact-K shapes whose K is a whole number
+of 512-code stages; the tall engine keeps 129+, and the single-token decode, the 17..128 window and
+padded-K shapes keep A16. The workspace queries, `q3_linear_swiglu`, `linear_add` and the input-
+projection wrappers follow the policy.
+
+**The bug that cost the session: the activation scale plane is group-major.**
+`a8_g64_quantize` writes scale `[g * tokens + t]` and the tall A8 engine reads exactly that layout;
+the small-T engine first read it token-major. The visible symptom was that even 64-code groups
+matched the tall route and odd groups vanished. The fix keeps the group-major order in the smem
+tile, which leaves every group's run starting at an arbitrary float offset, so the scales are
+staged with **4-byte** cp.async per (group, token): a 16-byte copy from a misaligned address is
+dropped silently, which zeroed every scale except group 0's (offset 0).
+
+- `ninfer_linear_q3_a8_small_t_test` passes the documented-quantization FP64 oracle on all six
+  registered parents at T=2..16 plus the padded-K, 256-code-stage and A16Only fallbacks; the other
+  eight Q3 suites are unchanged.
+- Op bench `34816x5120` (cold L2): T=2..8 A16 185-189 -> A8 157-159, T=9..16 A16 327 -> A8 278
+  (-15..-17%, the separate activation quantization included; CSV
+  `profiles/bench/5c-decode-levers/a8small_34816x5120.csv`).
+- Engine with `--greedy` (identical rounds and acceptance): MTP3 91.6 -> **101.0** tok/s, DFlash2
+  K=7 104.9 -> **118.2**, K=15 60.4 -> **67.1** (+10..13%). The greedy texts are byte-identical for
+  K=7 and K=15; MTP3 drifts by one phrase at a near-tie (`"understand what's already there"`
+  against `"understand what I'm working with"`), the documented-quantization class the decode A8
+  profile introduces. Logs `profiles/bench/5c-decode-levers/{a16,a8small}_greedy_*.log`.
+- This is the only remaining maintainer call from this session: the decode A8 profile changes
+  decode numerics by design, so if the MTP3 near-tie drift is unwanted the `q3_uses_a8` small-T
+  branch can be limited to prefill widths with a one-line change.
+- Full `ctest` after both items: **133 tests, 120 passed, 13 expected skips, 0 failed** (session 15
+  was 132/119/13/0; the new `ninfer_linear_q3_a8_small_t_test` is the addition). `git diff --check`
+  is clean.

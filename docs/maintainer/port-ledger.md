@@ -58,8 +58,9 @@ deleted when the work finishes. Three items belong in this ledger:
   the documented quantization in their FP64 oracle. On the 4080 the route is ~1.9x the A16 tall
   GEMM at T=129..513; `pp32768` 1406.34 -> 2277.53 tok/s and `pp100000 --prefill-chunk 2688`
   1166.48 -> 1675.39 tok/s, quick perplexity 4.596525 -> 4.596095, and decode unchanged
-  (tg512 53.2-53.9 tok/s at the same acceptance). The same kernel at decode widths is slower
-  than the staged small-T GEMV, so A8 stays prefill-only.
+  (tg512 53.2-53.9 tok/s at the same acceptance). The tall kernel at decode widths is slower than
+  the staged small-T GEMV, so the prefill route stays the tall engine; session 16 added a separate
+  small-T A8 engine for those widths.
 - **5c.3 n-gram drafts (partial port, 2026-09-27; wide verify window disabled).** Ported from
   `375542a`, `535f9c1`, and `be3b680`: `ngram_pool.h`/`ngram_policy.h` with the policy unit test,
   the `mtp_round` verify-width split and every engine/round-state/workspace/ReplaySSM consumer,
@@ -84,6 +85,20 @@ deleted when the work finishes. Three items belong in this ledger:
   scenario measures 100.9 tok/s at 38.2% acceptance (stock 93.4/35.7%) and the 8K/28K/56K depth
   sweep 124.2/205.5/182.7 tok/s. Full `ctest` 131/131. The 8-bit selector codebook (about
   0.12 GiB) remains open.
+- **Small-T 9..16-column route (2026-09-30, session 16).** The Q3 small-T tensor-core engine
+  (`q3_rowsplit_small_t_mma.{cuh,cu}`) launches one CTA per (row block, 8-column token tile), token
+  tile fastest, so widths 9..16 run as two tiles instead of falling back to the staged 32x64 tile.
+  The dispatch, the folded SwiGLU route and the workspace queries follow. Op bench `34816x5120`
+  T=9..16 437 -> 328 us; DFlash2 K=15 on the CLI scenario 39.6 -> 53.0 tok/s. This is our own
+  extension, not a fork port.
+- **Small-T A8 decode engine (2026-09-30, session 16).** `q3_rowsplit_small_t_a8_mma.{cuh,cu}`
+  plus the shared `q3_rowsplit_a8_codec.cuh` (also used by the tall A8 engine): 512-code stages,
+  one 64-code activation group per warp, whole-stage cp.async staging, int8 decoded tiles and
+  m16n8k32 s8 MMAs, with the documented activation quantization of `op-development.md` 6.4. Exact-K
+  shapes whose K is a whole number of 512-code stages run it from 2 columns; 1, 17..128 and
+  padded-K keep A16 and 129+ keeps the tall engine. Op bench `34816x5120` T=2..16 -15..-17% against
+  A16; greedy engine MTP3 +10%, DFlash2 K=7 +13%, K=15 +11%, with the K=7/K=15 texts unchanged.
+  Also our own extension of the shared 5c.2 A8 contract, not a fork port.
 
 ## Feature rows
 
