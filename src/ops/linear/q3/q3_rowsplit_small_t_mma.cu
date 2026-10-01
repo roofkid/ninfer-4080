@@ -20,7 +20,7 @@ void require_small_t_linear_shape(const Tensor& x, const Weight& w, const Tensor
     }
     if (x.ne[0] != w.k || out.ne[0] != w.n || out.ne[1] != x.ne[1] || x.ne[2] != 1 ||
         x.ne[3] != 1 || out.ne[2] != 1 || out.ne[3] != 1 || x.ne[1] < 1 ||
-        x.ne[1] > q3_small_t::kTokens) {
+        x.ne[1] > q3_small_t::kMaxTokens) {
         throw std::invalid_argument("q3 small-T MMA linear: unsupported tensor shape");
     }
 }
@@ -33,7 +33,7 @@ void require_small_t_swiglu_shape(const Tensor& x, const Weight& w, const Tensor
         throw std::invalid_argument("q3 small-T MMA swiglu: unsupported weight shape");
     }
     if (x.ne[0] != w.k || out.ne[1] != x.ne[1] || x.ne[2] != 1 || x.ne[3] != 1 ||
-        out.ne[2] != 1 || out.ne[3] != 1 || x.ne[1] < 1 || x.ne[1] > q3_small_t::kTokens) {
+        out.ne[2] != 1 || out.ne[3] != 1 || x.ne[1] < 1 || x.ne[1] > q3_small_t::kMaxTokens) {
         throw std::invalid_argument("q3 small-T MMA swiglu: unsupported tensor shape");
     }
 }

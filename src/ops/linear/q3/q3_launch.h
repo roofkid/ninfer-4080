@@ -35,4 +35,10 @@ void launch_q3_mma_small_t_r32_c8(const Tensor& x, const Weight& w, Tensor& out,
                                   cudaStream_t stream);
 void launch_q3_mma_small_t_swiglu_r16_c8(const Tensor& x, const Weight& w, Tensor& out,
                                          cudaStream_t stream);
+// Small-T A8 routes: 32 weight rows x up to 8 tokens per CTA over whole 512-code stages of the
+// activation quantized by a8_g64_quantize, one 64-code group per warp and m16n8k32 s8 MMAs.
+void launch_q3_mma_small_t_a8_r32_c8(const A8G64Activation& act, const Weight& w, Tensor& out,
+                                     cudaStream_t stream);
+void launch_q3_mma_small_t_a8_swiglu_r16_c8(const A8G64Activation& act, const Weight& w,
+                                            Tensor& out, cudaStream_t stream);
 } // namespace ninfer::ops::detail

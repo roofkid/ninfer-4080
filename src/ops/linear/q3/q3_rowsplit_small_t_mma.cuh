@@ -1,6 +1,6 @@
 #pragma once
 
-// Q3G128_F16S RowSplit x BF16 small-T tensor-core GEMM for one to eight token columns.
+// Q3G128_F16S RowSplit x BF16 small-T tensor-core GEMM for one to sixteen token columns.
 //
 // The route exists because the decode and MTP widths are too narrow for the prefill engines
 // (one weight re-read per 64-column tile) and the warp-per-row GEMV leaves the tensor core idle
@@ -13,9 +13,9 @@
 //   * a three-buffer staging ring: every stage's codes and activation travel together, and the
 //     loop issues two stages ahead, so one stage's copies are always in flight while the previous
 //     stage is decoded and multiplied;
-//   * a small CTA footprint: 32 weight rows x up to 8 token columns per CTA. Staging four
-//     activation rows needs about 32 KiB and keeps three CTAs resident per SM; the eight-row
-//     shape needs about 38 KiB and keeps two;
+//   * a small CTA footprint: 32 weight rows x one 8-column token tile per CTA (9..16 columns
+//     run two tiles), which keeps several CTAs resident per SM: staging four activation rows
+//     needs about 32 KiB and keeps three; the eight-row shape needs about 38 KiB and keeps two;
 //   * K-split: the eight warps split each 256-code stage, each warp owning two 16-code slices,
 //     and a shared-memory tree reduces their accumulators once per CTA.
 //
@@ -40,6 +40,7 @@
 #include <cuda_fp16.h>
 
 #include <cstdint>
+#include <stdexcept>
 
 namespace ninfer::ops::detail::q3_small_t {
 
@@ -47,6 +48,10 @@ namespace ninfer::ops::detail::q3_small_t {
 // stages. Every registered Q3 parent's padded K is a multiple of 256.
 constexpr int kRows           = 32;
 constexpr int kTokens         = 8;
+// Widths above one 8-column tile run one CTA per tile (at most two), token tile fastest in the
+// grid so a row block's CTAs share its code bytes in L2.
+constexpr int kMaxTokenTiles = 2;
+constexpr int kMaxTokens     = kTokens * kMaxTokenTiles;
 constexpr int kWarps          = 8;
 constexpr int kThreads        = kWarps * 32;
 constexpr int kGroupK         = 256;
@@ -114,12 +119,11 @@ struct Q3SmallTLinearProblem {
         const std::int64_t grow = static_cast<std::int64_t>(row_block) * kRows + local_row;
         return scales + grow * groups_per_row;
     }
-    __device__ __forceinline__ void emit(int row_block, int lane, const float (&acc)[kM16Tiles][4],
-                                         int tokens) const {
+    __device__ __forceinline__ void emit(int row_block, int token0, int lane,
+                                         const float (&acc)[kM16Tiles][4], int tokens) const {
         const int gid  = lane >> 2;
         const int lid  = lane & 3;
-        const int col0 = 2 * lid;
-#pragma unroll
+        const int col0 = token0 + 2 * lid;
         for (int t = 0; t < kM16Tiles; ++t) {
             const int row0 = row_block * kRows + t * 16 + gid;
             if (col0 < tokens) {
@@ -162,11 +166,11 @@ struct Q3SmallTSwiGluProblem {
             (local_row >= 16) ? static_cast<std::int64_t>(intermediate) + out_row : out_row;
         return scales + grow * groups_per_row;
     }
-    __device__ __forceinline__ void emit(int row_block, int lane, const float (&acc)[kM16Tiles][4],
-                                         int tokens) const {
+    __device__ __forceinline__ void emit(int row_block, int token0, int lane,
+                                         const float (&acc)[kM16Tiles][4], int tokens) const {
         const int gid  = lane >> 2;
         const int lid  = lane & 3;
-        const int col0 = 2 * lid;
+        const int col0 = token0 + 2 * lid;
 #pragma unroll
         for (int half = 0; half < 2; ++half) {
             const int row = row_block * 16 + gid + half * 8;
@@ -187,14 +191,18 @@ struct Q3SmallTSwiGluProblem {
 template <class Problem, int StageTokens = 4>
 __global__ void __launch_bounds__(kThreads, StageTokens == 4 ? 3 : 2)
     q3_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x, Problem problem, std::int32_t k,
-                          std::int32_t padded_k, std::int32_t tokens) {
+                          std::int32_t padded_k, std::int32_t tokens,
+                          std::int32_t token_tiles) {
     static_assert(StageTokens == 4 || StageTokens == 8);
     __shared__ Storage<StageTokens> storage;
 
     const int tid       = static_cast<int>(threadIdx.x);
     const int warp      = tid >> 5;
     const int lane      = tid & 31;
-    const int row_block = static_cast<int>(blockIdx.x);
+    const int tile      = static_cast<int>(blockIdx.x);
+    const int row_block = tile / token_tiles;
+    const int token0    = (tile % token_tiles) * kTokens;
+    const int live      = min(kTokens, tokens - token0);
     const std::int32_t stages = padded_k / kGroupK;
 
     // Whole-group staging: the codes of one row's stage are 96 contiguous bytes (six 16-byte
@@ -214,10 +222,11 @@ __global__ void __launch_bounds__(kThreads, StageTokens == 4 ? 3 : 2)
             const int token = tid >> 5;
             const int chunk = tid & 31;
             const std::int32_t k0 = stage * kGroupK + chunk * 8;
-            const bool live = token < tokens && k0 < k;
+            const bool ok = token < live && k0 < k;
             const __nv_bfloat16* src =
-                x + static_cast<std::int64_t>(live ? token : 0) * k + (live ? k0 : 0);
-            cp_async_zfill<16>(&target.x[token][(chunk ^ (token & 7)) * 8], src, live ? 16 : 0);
+                x + static_cast<std::int64_t>(ok ? token0 + token : token0) * k +
+                (ok ? k0 : 0);
+            cp_async_zfill<16>(&target.x[token][(chunk ^ (token & 7)) * 8], src, ok ? 16 : 0);
         }
         if (tid < kRows) {
             cp_async<4>(&target.scale[tid][0],
@@ -361,23 +370,28 @@ __global__ void __launch_bounds__(kThreads, StageTokens == 4 ? 3 : 2)
                 acc[t][3] += value.w;
             }
         }
-        problem.emit(row_block, lane, acc, tokens);
+        problem.emit(row_block, token0, lane, acc, tokens);
     }
 }
 
-// Launches `row_blocks` CTAs over an activation of `tokens` columns (1..8). The weight's padded
-// K must be a whole number of 256-code stages and the logical K must not exceed it.
+// Launches one CTA per (row block, 8-column token tile) over an activation of `tokens` columns
+// (1..16), token tile fastest. The weight's padded K must be a whole number of 256-code stages
+// and the logical K must not exceed it.
 template <class Problem>
 void launch(const Problem& problem, std::int32_t row_blocks, const __nv_bfloat16* x,
             std::int32_t k, std::int32_t padded_k, std::int32_t tokens, cudaStream_t stream) {
+    if (tokens <= 0 || tokens > kMaxTokens) {
+        throw std::invalid_argument("q3 small-T MMA: unsupported token extent");
+    }
+    const std::int32_t token_tiles = (tokens + kTokens - 1) / kTokens;
+    const unsigned grid =
+        static_cast<unsigned>(row_blocks) * static_cast<unsigned>(token_tiles);
     if (tokens <= 4) {
-        q3_small_t_mma_kernel<Problem, 4>
-            <<<static_cast<unsigned>(row_blocks), kThreads, 0, stream>>>(x, problem, k, padded_k,
-                                                                        tokens);
+        q3_small_t_mma_kernel<Problem, 4><<<grid, kThreads, 0, stream>>>(x, problem, k, padded_k,
+                                                                        tokens, token_tiles);
     } else {
-        q3_small_t_mma_kernel<Problem, 8>
-            <<<static_cast<unsigned>(row_blocks), kThreads, 0, stream>>>(x, problem, k, padded_k,
-                                                                        tokens);
+        q3_small_t_mma_kernel<Problem, 8><<<grid, kThreads, 0, stream>>>(x, problem, k, padded_k,
+                                                                        tokens, token_tiles);
     }
     CUDA_CHECK(cudaGetLastError());
 }

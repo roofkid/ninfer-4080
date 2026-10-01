@@ -39,14 +39,19 @@ int check_route_boundaries() {
         ninfer::ops::detail::Q3Launch expected;
         const char* label;
     };
-    const std::array<Case, 7> cases{{
+    const std::array<Case, 10> cases{{
         {34816, 5120, 5120, 1, detail::launch_q3_gemv_r8_c8_staged, "T=1 stays on the staged GEMV"},
         {34816, 5120, 5120, 2, detail::launch_q3_mma_small_t_r32_c8, "T=2 takes the small-T MMA"},
         {34816, 5120, 5120, 4, detail::launch_q3_mma_small_t_r32_c8, "T=4 takes the small-T MMA"},
         {34816, 5120, 5120, 8, detail::launch_q3_mma_small_t_r32_c8, "T=8 takes the small-T MMA"},
-        {34816, 5120, 5120, 9, detail::launch_q3_mma_r32_c64, "T=9 falls back to the staged 32x64"},
-        {34816, 4304, 4352, 4, detail::launch_q3_mma_small_t_r32_c8,
-         "a padded final group still fits whole 256-code stages"},
+        {34816, 5120, 5120, 9, detail::launch_q3_mma_small_t_r32_c8,
+         "T=9 keeps the small-T MMA with two token tiles"},
+        {34816, 5120, 5120, 16, detail::launch_q3_mma_small_t_r32_c8, "T=16 keeps the small-T MMA"},
+        {34816, 5120, 5120, 17, detail::launch_q3_mma_r32_c64, "T=17 falls back to the staged 32x64"},
+        {34816, 4224, 4224, 12, detail::launch_q3_mma_r32_c64,
+         "a padded K beyond whole 256-code stages keeps the staged 32x64"},
+        {34816, 4304, 4352, 12, detail::launch_q3_mma_small_t_r32_c8,
+         "a padded final group still fits whole 256-code stages at two tiles"},
         {34816, 4224, 4224, 4, detail::launch_q3_gemv_r8_c8_staged,
          "a 128-code-padded tail keeps the GEMV"},
     }};
@@ -65,20 +70,22 @@ int small_t_oracle() {
     int failures = 0;
 
     // The whole small-T domain on one registered shape, with normal-range multipliers.
-    constexpr std::array kSmallShapeTokens{a16(1), a16(2), a16(3), a16(4),
-                                           a16(5), a16(6), a16(7), a16(8), a16(9)};
+    constexpr std::array kSmallShapeTokens{a16(1),  a16(2),  a16(3),  a16(4),  a16(5),  a16(6),
+                                           a16(7),  a16(8),  a16(9),  a16(10), a16(11), a16(12),
+                                           a16(13), a16(14), a16(15), a16(16)};
     failures += run_shape("Q3_A16 small-T unit scales", ActivationCompute::A16,
                           make_q3g128_f16s_unit_weight,
                           {1024, 5120, 2609U, Comparison::Full, true, kSmallShapeTokens});
 
     // The widest registered parent at the decode and MTP verify widths, sampled.
-    constexpr std::array kGateUpTokens{a16(1), a16(2), a16(4), a16(6), a16(8)};
+    constexpr std::array kGateUpTokens{a16(1), a16(2), a16(4), a16(6), a16(8), a16(9), a16(12),
+                                       a16(16)};
     failures += run_shape("Q3_A16 small-T unit scales gate_up", ActivationCompute::A16,
                           make_q3g128_f16s_unit_weight,
                           {34816, 5120, 2617U, Comparison::Sampled, false, kGateUpTokens});
 
     // A logical K that only pads to a whole 128-code group, with the route's own 256-code stage.
-    constexpr std::array kPaddedTokens{a16(2), a16(4), a16(8)};
+    constexpr std::array kPaddedTokens{a16(2), a16(4), a16(8), a16(9), a16(16)};
     failures += run_shape("Q3_A16 small-T unit scales padded", ActivationCompute::A16,
                           make_q3g128_f16s_unit_weight,
                           {4096, 4304, 2621U, Comparison::Sampled, false, kPaddedTokens});

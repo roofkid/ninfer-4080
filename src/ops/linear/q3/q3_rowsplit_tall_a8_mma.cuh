@@ -26,9 +26,9 @@
 #include "core/device.h"
 #include "ops/common/mma.cuh"
 #include "ops/common/memory.cuh"
+#include "ops/linear/q3/q3_rowsplit_a8_codec.cuh"
 #include "ops/linear/q3/q3_rowsplit_storage.cuh"
 #include "ops/linear/q3/q3_rowsplit_tall_mma.cuh"
-
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
@@ -78,18 +78,6 @@ __device__ __forceinline__ unsigned swizzled(int line, int chunk) {
     return static_cast<unsigned>(line * 64 + ((chunk ^ ((line >> 1) & 3)) << 4));
 }
 
-// Four int8 lanes of 3-bit two's-complement codes: ((n ^ 4) + 0x7C) ^ 0x80 is n - 8 for n >= 4
-// and n otherwise, with no carry between bytes.
-__device__ __forceinline__ unsigned q3_a8_sign_extend(unsigned bytes) {
-    return ((bytes ^ 0x04040404u) + 0x7C7C7C7Cu) ^ 0x80808080u;
-}
-
-// One 12-bit window of four 3-bit codes, placed one per byte and sign extended to int8.
-__device__ __forceinline__ unsigned q3_a8_spread4(unsigned window) {
-    const unsigned bytes = (window & 0x7u) | ((window & 0x38u) << 5) | ((window & 0x1C0u) << 10) |
-                           ((window & 0xE00u) << 15);
-    return q3_a8_sign_extend(bytes);
-}
 
 template <int Tokens, class Problem>
 __global__ void __launch_bounds__(kThreads, 1)
@@ -138,8 +126,8 @@ __global__ void __launch_bounds__(kThreads, 1)
 #pragma unroll
         for (int j = 0; j < 4; ++j) {
             const std::uint32_t window = q3_tall::q3_tall_window(raw0, raw1, raw2, j);
-            out[2 * j]                 = q3_a8_spread4(window & 0x0fffu);
-            out[2 * j + 1]             = q3_a8_spread4(window >> 12);
+            out[2 * j]                 = q3_a8::spread4(window & 0x0fffu);
+            out[2 * j + 1]             = q3_a8::spread4(window >> 12);
         }
         *reinterpret_cast<uint4*>(s.a + swizzled(my_row, 2 * my_half)) =
             make_uint4(out[0], out[1], out[2], out[3]);

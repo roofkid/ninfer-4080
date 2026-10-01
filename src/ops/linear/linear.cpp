@@ -130,13 +130,23 @@ std::size_t linear_workspace_capacity_bytes(QType qtype, std::int32_t output_row
         // logical K is passed and any disagreement only selects a workspace-free route.
         (void)detail::select_q3_launch(output_rows, input_rows, input_rows, min_tokens, policy);
         (void)detail::select_q3_launch(output_rows, input_rows, input_rows, max_tokens, policy);
-        // The A8 activation is the only Q3 transient, and its size grows with the width. The
-        // padded-K question is not visible here; a padded weight falls back to A16 in dispatch
-        // and only over-reserves.
-        if (policy == LinearPolicy::AllowA8 && max_tokens >= detail::kQ3A8MinTokens &&
-            output_rows > 0 && (output_rows % 128) == 0 && input_rows > 0 &&
-            (input_rows % 64) == 0) {
-            return detail::q3_a8_workspace_capacity_bytes(input_rows, max_tokens);
+        // The A8 activation is the only Q3 transient, and its size grows with the width: the tall
+        // engine from 129 columns, the small-T engine over 2..16. The padded-K question is not
+        // visible here; a padded weight falls back to A16 in dispatch and only over-reserves.
+        if (policy == LinearPolicy::AllowA8 && output_rows > 0 && input_rows > 0 &&
+            (input_rows % detail::kQ3A8StepK) == 0 &&
+            ((output_rows % detail::kQ3A8Rows) == 0 ||
+             (output_rows % detail::kQ3SmallTRows) == 0)) {
+            if (max_tokens >= detail::kQ3A8MinTokens) {
+                return detail::q3_a8_workspace_capacity_bytes(input_rows, max_tokens);
+            }
+            if (max_tokens >= detail::kQ3SmallTA8MinTokens &&
+                min_tokens <= detail::kQ3SmallTMaxTokens) {
+                const std::int32_t span =
+                    max_tokens < detail::kQ3SmallTMaxTokens ? max_tokens
+                                                           : detail::kQ3SmallTMaxTokens;
+                return detail::q3_a8_workspace_capacity_bytes(input_rows, span);
+            }
         }
         return 0;
     case QType::Q5G64_F16S:

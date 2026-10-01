@@ -58,10 +58,15 @@ std::size_t q3_linear_swiglu_workspace_capacity_bytes(std::int32_t min_tokens,
         throw std::invalid_argument("q3 linear_swiglu workspace: Q3 admits only A16 or A8");
     }
     std::size_t bytes = 0;
-    if (policy == LinearPolicy::AllowA8 && max_tokens >= kQ3A8MinTokens) {
-        bytes = q3_a8_workspace_capacity_bytes(kInputCols, max_tokens);
+    if (policy == LinearPolicy::AllowA8) {
+        if (max_tokens >= kQ3A8MinTokens) {
+            bytes = q3_a8_workspace_capacity_bytes(kInputCols, max_tokens);
+        } else if (max_tokens >= kQ3SmallTA8MinTokens && min_tokens <= kQ3SmallTMaxTokens) {
+            bytes = q3_a8_workspace_capacity_bytes(kInputCols,
+                                                   std::min(max_tokens, kQ3SmallTMaxTokens));
+        }
     }
-    if (max_tokens > kGemvColumns && min_tokens < kTallColumns) {
+    if (max_tokens > q3_small_t::kMaxTokens && min_tokens < kTallColumns) {
         const std::int64_t columns = std::min<std::int32_t>(max_tokens, kChunkCols - 1);
         bytes = std::max(bytes, static_cast<std::size_t>(2 * kOutputRows) *
                                     static_cast<std::size_t>(columns) * sizeof(float));
@@ -83,16 +88,22 @@ void q3_linear_swiglu_dispatch(const Tensor& x, const Weight& w, Tensor& out,
         auto scope = ws.scope();
         A8G64Activation act = allocate_a8_g64_activation(ws, w.k, columns);
         a8_g64_quantize(x, act, stream);
-        launch_q3_mma_tall_a8_swiglu_r64_c128(act, w, out, stream);
+        if (columns >= kQ3A8MinTokens) {
+            launch_q3_mma_tall_a8_swiglu_r64_c128(act, w, out, stream);
+        } else {
+            launch_q3_mma_small_t_a8_swiglu_r16_c8(act, w, out, stream);
+        }
+        return;
+    }
+    // The single-token decode keeps the fused GEMV; widths 2..16 use the small-T tensor-core
+    // route (whole-group staging and tensor-core multiplies at several CTAs/SM) when the
+    // geometry fits it, and only the wider narrow widths keep the column-chunked FP32 plane.
+    if (columns >= 2 && columns <= q3_small_t::kMaxTokens && (w.k % 8) == 0 &&
+        (w.padded_shape[1] % q3_small_t::kGroupK) == 0) {
+        launch_q3_mma_small_t_swiglu_r16_c8(x, w, out, stream);
         return;
     }
     if (columns <= kGemvColumns) {
-        // The single-token decode keeps the fused GEMV; the wider widths use the small-T
-        // tensor-core route: whole-group staging and tensor-core multiplies at several CTAs/SM.
-        if (columns >= 2 && (w.k % 8) == 0 && (w.padded_shape[1] % q3_small_t::kGroupK) == 0) {
-            launch_q3_mma_small_t_swiglu_r16_c8(x, w, out, stream);
-            return;
-        }
         const dim3 grid(
             static_cast<unsigned>((kOutputRows + q3_gemv_staged::kWarpsPerCta - 1) /
                                    q3_gemv_staged::kWarpsPerCta),
