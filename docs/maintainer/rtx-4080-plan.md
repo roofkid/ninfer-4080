@@ -109,9 +109,11 @@ docker run --rm -it --gpus all \
 ```
 
 For daily serving rather than development, `scripts/run-ninfer-4080.bat` (Windows host) and
-`scripts/run-ninfer-4080.sh` build the product `Dockerfile` image and start the served 100K MTP3
-profile with the artifact bind-mounted read-only; the dev container above stays the build and
-measurement environment.
+`scripts/run-ninfer-4080.sh` build the product `Dockerfile` image (first run, and whenever the
+checkout revision changes) and start the served 100K MTP3 profile with the artifact bind-mounted
+read-only; every build stamps `org.ninfer.revision`, so pulling source changes reaches the served
+binary without a manual rebuild. The dev container above stays the build and measurement
+environment.
 
 Resume by reading this file top to bottom, then running §10.
 
@@ -1873,3 +1875,222 @@ dropped silently, which zeroed every scale except group 0's (offset 0).
 - Full `ctest` after both items: **133 tests, 120 passed, 13 expected skips, 0 failed** (session 15
   was 132/119/13/0; the new `ninfer_linear_q3_a8_small_t_test` is the addition). `git diff --check`
   is clean.
+
+### Serving-launcher rebuild tracking and the decode re-measurement (2026-10-01, session 17)
+
+**Launchers rebuild on checkout change.** All four 4080 launchers
+(`scripts/run-ninfer-4080{,-dflash2}.{sh,bat}`) stamp every image build with
+`--label org.ninfer.revision=<git rev-parse --short=12 HEAD>` (plus a `-dirty` suffix when the
+worktree has changes) and rebuild when the image is missing or its label differs from the current
+revision. Previously they built only on the first run, so a pulled decode improvement kept being
+served by the old image; now re-running a launcher after a pull rebuilds it. `NINFER_IMAGE` still
+selects the image; headers carry the current route, the measurement summary, and the DFlash2
+draft-window correction (the small-T tensor cores cover K=1..15, widths 2..16, not just width 8).
+
+**Depth re-measurement on the session-16 build** (`out/qwen3_8_27b_gsq3.ninfer`,
+13,330,776,576 B; tiled corpus `profiles/bench/bench_corpus_131072.ids`, `rk4v4-e8`,
+`--prefill-chunk 1024`, one repetition per point; logs
+`profiles/bench/5c-decode-levers/session17_depth_{mtp3,dflash2_k7,dflash2_k15}.log`):
+
+| Point | MTP3 decode | DFlash2 K=7 decode | MTP3 prefill | DFlash2 K=7 prefill |
+|---|---:|---:|---:|---:|
+| 8K | 130.16 | 136.02 | 2693.62 | 2672.12 |
+| 28K / 32K | 126.19 (32K) | 232.13 (28K) | 2297.57 (32K) | 2333.56 (28K) |
+| 56K / 98K | 109.36 (98K) | 204.94 (56K) | 1651.00 (98K) | 1986.37 (56K) |
+
+The same points measured 125/118/103 (session 10, MTP3) and 124/205/183 (session 12, DFlash2
+K=7), so the A8 small-T decode profile is visible in the product route, not only in the op bench.
+The decode A8 profile stays enabled (no `q3_uses_a8` change): the maintainer's direction was to
+reap the decode improvement, and the launcher headers state it. The session-16 MTP3 near-tie drift
+is the accepted consequence of that choice.
+
+**K=7 stays the DFlash2 window.** The route widening made depth a free choice again (session 11
+picked K=7 because widths above 8 left the fast small-T route), so the K=15 point was re-measured
+on the same three depths (log `profiles/bench/5c-decode-levers/session17_depth_dflash2_k15.log`):
+79.42/197.21/153.66 tok/s at 8K/28K/56K with 23.3/76.0/61.2% acceptance, against K=7's
+136.02/232.13/204.94 at 49.0/100/95.7%. K=15 loses at every point even where acceptance is
+high. The structure makes that hard to escape: the Q3 small-T cost jumps at T=9 (the second
+8-column tile) and is flat through T=16 (A8 op bench 157-159 us at T=2..8 against 278 us at
+T=9..16), so K=8..14 pay the wide-window price with the second tile partly unused and the only
+real candidates are K=7 and K=15; and K=15's extra accepted tokens do not cover the ~1.7x round
+cost (at 28K it takes 11.6 tokens/round against K=7's 8.0; at 8K both need 29 rounds and K=15 is
+simply 1.7x slower). K=7 remains selected; widen only if a workload's acceptance holds far past
+position 8, which neither the code scenario nor the tiled corpus does.
+
+### MBPP quality: the RCO weight-allocation confound (2026-10-01, session 18)
+
+**Observation (maintainer).** MBPP pass rate 88% with beellama on
+`Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf` at Q8_0 KV, against 84% with this artifact's DFlash2 K=7
+profile (`rk4v4-e8`).
+
+**The two systems do not carry the same weights.** The baseline GGUF is the RCO release
+`ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF` IQ3_S: 3.50 bpw whole-file, a per-tensor RCO allocation
+over GGUF types (IQ3_S 144, IQ4_XS 96, IQ3_XXS 78, Q4_K 39, IQ2_S 17, Q2_K 13, IQ2_XS 9, Q6_K 8,
+IQ2_XXS 5, IQ1_M 1; `output.weight` Q4_K, `token_embd` IQ2_S), quantized with the shipped
+importance matrix and published as task-lossless (LiveCodeBench v6 85.71 = BF16). This artifact
+is a verbatim repack of the *different* uniform checkpoint `ISTA-DASLab/Qwen3.8-27B-3Bit-GSQ`
+(3-bit G128 body, Q4G64 endpoints) — GSQ without the RCO per-tensor allocation. So a code-
+benchmark delta between the two systems cannot be attributed to KV alone. The active differences,
+cheapest first:
+
+1. **Sampling.** The plan's beellama baseline ran `temperature 0`. The DFlash2 and MTP launchers
+   serve `--temperature 1 --top-k 20 --top-p 0.95 --presence-penalty 0` as server defaults, and
+   `resolve_sampling_overrides` lets only an explicit request override them; a harness that omits
+   sampling gets temp-1 sampling from NInfer and whatever beellama's default is. Check the
+   request `temperature` (the `--request-log-jsonl` records it) and pin greedy for both engines.
+2. **KV storage.** Q8_0 (8-bit block-32, fp16 scale) vs `rk4v4-e8` (Hadamard-rotated 4-bit E8 K +
+   4-bit V, 64-group scales); INT8-G64 is the local analogue of Q8_0. Session 14's control and
+   session 15's trajectory-sensitivity closure show quantized KV flips whole greedy generations at
+   near-ties, and `int8` is not clean either (20.97-nat gross flip against `rk4v4-e8`'s 6.75 and
+   bf16's 0.5); only `bf16` is lossless. Task-level MBPP effect is unmeasured.
+3. **Decode A8.** Session 16's int8 activation profile is enabled at decode widths 2..16, so it
+   runs inside DFlash2 K=7 (W=8) and MTP3 (W=4). It moves PPL by -0.0004 and one DFlash2 K=7
+   fixture stayed byte-identical, but it is the newest task-level-unvalidated numeric change.
+4. **Spec backend.** DFlash2 K=7 is greedy-lossless against the engine's own routes; a `--spec
+   mtp` vs `--spec dflash2` MBPP delta at fixed KV and greedy would be a verify defect.
+
+**Isolation set** (same artifact and harness, one variable per run, greedy; `bf16`/`int8` fit
+MBPP-scale contexts on the 16 GiB card):
+
+```bash
+# KV: bf16 (lossless) / int8 (Q8_0 analogue) / rk8v4 (8-bit K, 4-bit V) at the same spec
+ninfer-serve out/qwen3_8_27b_gsq3.ninfer --max-context 16384 --kv-capacity 16384 \
+  --kv-dtype bf16 --spec dflash2 --draft-tokens 7 --lm-head-draft --greedy --host-kv-mib 4096
+# Backend: same KV, MTP3
+ninfer-serve out/qwen3_8_27b_gsq3.ninfer --max-context 100000 --kv-capacity 100000 \
+  --kv-dtype rk4v4-e8 --spec mtp --draft-tokens 3 --lm-head-draft --greedy --host-kv-mib 4096
+# Decode A8 off: q3_uses_a8's small-T branch -> return false, rebuild, rerun the same command
+```
+
+Calibrate the weight hypothesis inside beellama before any artifact work: rerun the same MBPP
+harness on the same repo's IQ3_XXS (3.00 bpw) and IQ2_S (2.75 bpw) GGUFs at Q8_0 KV. If they
+fall to ~84, this artifact's uniform 3.125-bpw result is a weight-budget result, not a KV one.
+
+**RCO cannot be added to inference; it is a quantization-time search.** The released pipeline
+(IST-DASLab/RCO, IST-DASLab/GSQ) quantizes every tensor at every candidate type with GSQ into a
+per-tensor database, runs the budget-constrained Riemannian search on task loss, then assembles
+the chosen mix. Inference only consumes stored formats. A mixed-allocation `.ninfer` variant
+would therefore need: the full BF16 source (51.75 GiB), the GSQ/RCO code and calibration data, a
+search over *NInfer's* registered formats (Q3G128/Q4G64/Q5/Q6/W8 - GGUF I-quants/K-quants and
+their imatrix scales cannot be reproduced here), a new recipe/identity, and its own PPL+MBPP
+gate; the result would not byte-match the GGUF or inherit its 88%. The interesting variant is
+equal-budget (same artifact size, better allocation), which keeps the 16 GB fit; matching IQ3_S's
+3.50 bpw costs roughly +1 GB on the body and does not fit the DFlash2 100K profile (625 MiB free
++ 78 MiB slack). This is the "RCO per-tensor allocation search" plan §9 excluded, and it is a
+maintainer scope decision. Cleanest alternative: ask ISTA-DASLab whether a compressed-tensors
+GSQ-RCO checkpoint can be published, which would repack verbatim under D2.
+
+**Recommendation (updated after the KV control).** The KV codec is the cause: `rk4v4-e8` costs
+the 4 points and `int8` recovers them on the same artifact. The RCO/weight campaign and the
+GGUF port above are off the critical path. Next: bisect the codec with `--kv-dtype rk8v4`
+(8-bit K, 4-bit V) on the same harness - 88% points at the 4-bit K, 84% at the 4-bit V - then
+either port KVarN or make the targeted change the bisect names. Until then `int8` is the
+accuracy profile wherever the context fits (~70K text-only with DFlash2, ~79K with MTP on this
+card's startup headroom; MBPP-scale contexts fit trivially).
+
+**Launcher override (2026-10-01).** All four 4080 launchers now take `NINFER_KV_DTYPE`
+(default `rk4v4-e8`) instead of a hardcoded `--kv-dtype`, and echo the served mode;
+`scripts/check-linux-scripts.sh` covers the override. The DFlash2 launcher's POSIX and Windows
+variants had drifted (`.sh` used `rk4v4-e8`, `.bat` used `int8` locally); the override makes
+the bisect runs (`NINFER_KV_DTYPE=int8`, `rk8v4`, `rk4v4`) one env var on both hosts.
+
+**GSQ-RCO port landed (2026-10-01, session 18).** Three findings shaped the converter:
+
+- **V-head order.** llama.cpp's `conversion/qwen.py` (`_LinearAttentionVReorderBase`) stores
+  the GDN value-side tensors in *tiled* `[group, K-head, dim]` order while the artifact (and
+  the GSQ checkpoint) use the grouped `[K-head, group, dim]` order: `in_proj_qkv` V rows,
+  `in_proj_z`, `in_proj_a/b`, `conv1d` V channels, `out_proj` columns, `A_log`, `dt_bias`. The
+  port inverts the permutation for `gdn/value_z` (V and Z) and `gdn/output`; every other GDN
+  object is copied from the GSQ3 artifact. Without the inversion the fused values measured
+  cosine 0.05 against the GSQ3 artifact; with it, 0.96-0.97 (full attention and MLP 0.92-0.95).
+- **Fused pairs are format-locked by the ops.** `attn_input_proj` requires (query_key,
+  gate_value) = (Q3,Q3) or (Q4,Q5); `gdn_input_proj` requires (gdn/query_key, gdn/value_z) =
+  (Q3,Q3) or (Q4,Q5); `linear_add` admits only Q3 or Q5 for `attention/output`, `gdn/output`,
+  and `mlp/down`. The allocation is therefore resolved per layer to a route, not per tensor: a
+  4-bit-or-wider contributor promotes the pair to (Q4,Q5), the linear_add sites and gate_up map
+  to Q5/Q4. Final mix: 175 Q3G128 + 59 Q4G64 + 88 Q5G64; the mixed artifact is
+  15,106,146,816 B and the all-Q3 RTN control 13,330,776,576 B.
+- **Second-generation quantizer.** The registered max-scaled grid loses about a third more
+  squared error than necessary at 3 bits, so the port uses a per-group clipping-factor search
+  (`gsqrco_quantize.py`, same fp16-scale/codes/clamp/padding contract). Measured
+  second-generation rel-L2: Q3 0.19-0.22, Q4 0.10-0.13, Q5 ~0.05.
+
+New files: `inventory_gsqrco.py`, `gsqrco_source.py`, `gsqrco_quantize.py`, `convert_gsqrco.py`,
+`verify_gsqrco.py`, and `tests/convert/qwen3_8_27b/test_gsqrco_{convert,quantize}.py`; the C++
+profile is `WeightsProfile::Qwen38GsqRcoIq3S` (identity `gsqrco-iq3s`) with `Binder::tensor_format`,
+a format-agnostic `bind_gsqrco_text_layers`, and Q5-aware site maxima in `variant.cpp`. Both
+artifacts load and generate through the new profile; PPL and the maintainer's MBPP run are the
+remaining gates.
+
+**Port results (2026-10-01).** Both artifacts load through the new profile and generate coherent
+greedy code on the CLI scenario (mixed: 66.6 tok/s, DFlash2 K=7 acceptance 24.6%; uniform
+control: 123.5 tok/s, 46.1%). `verify_gsqrco` checked all 322 ported objects against an
+independent gguf-py dequantization (worst rel-L2: Q3 0.2116, Q4 0.1133, Q5 0.0501) and all 862
+copied objects byte-identical to the GSQ3 donor. Quick perplexity (int8 KV, same corpus, same
+harness): GSQ3 **4.596095**, RCO port **4.685275**, uniform-RTN Q3 control **5.256053**. Reading:
+the RCO allocation improves on an equal-quantizer uniform body by 10.9% PPL, but the
+second-generation RTN+clipping quantizer loses more than the allocation recovers, so the port
+still trails the GSQ3 artifact by 1.9%. The limiting factor is quantization quality (GSQ), not
+the allocation or the artifact plumbing. Full `ctest`: 133 passed, 13 expected skips, 0 failed.
+The maintainer's MBPP run on the mixed artifact is the remaining product question; a quality win
+would need GSQ-quality re-quantization of the GGUF values or an official compressed-tensors
+GSQ-RCO checkpoint.
+
+**Follow-up (maintainer, 2026-10-01, corrected): the KV codec is the whole delta.** Controlled
+MBPP on the same artifact, DFlash2 K=7 backend, and harness: `rk4v4-e8` (4.375 b/v) **84%**,
+`int8` INT8-G64 (8.25 b/v) **88%**, beellama kvarn5/5 (5.375 b/v) 88%. The first reading recorded
+in this file was inverted; the corrected reading exonerates everything held constant between
+the two NInfer runs (weights - uniform GSQ3 vs the RCO GGUF, decode A8, sampling) and leaves
+the 4-bit E8 KV store as the sole cause: with `int8` the uniform GSQ3 artifact matches
+beellama's RCO IQ3_S on MBPP.
+
+**KVarN is now the leading long-context fix.** KVarN is Huawei CSL's variance-normalized KV
+quantization: Hadamard rotation, Sinkhorn-like iterative variance normalization over a
+128-token tile, asymmetric RTN, independent K/V widths 2-8 (~0.375 b/v metadata), with the
+incomplete tile and an exact sink kept in F16 (arXiv 2606.03458; Apache-2.0 vLLM fork; ported
+into `Anbeeld/beellama.cpp`, whose kvarn5/5 is the 88% reference). Its value is exactly what
+the `int8` control demands: 88%-class accuracy below int8 bytes. On this card's 100K accounting
+(`rk4v4-e8` 20.3 KiB/token, `int8` 38.5 KiB/token), kvarn4/4 (4.375 b/v) is about the current
+E8 size (~20.4 KiB/token, so every current profile fits unchanged) and kvarn5/5 (5.375 b/v) is
+~25.1 KiB/token, +0.47 GiB at 100K, inside the DFlash2 profile's 625 MiB free + 78 MiB slack
+but tight. The port is a cache-architecture change, not a codec swap: the encode normalizes a
+whole tile in two passes and must keep the open tile exact until it seals, which touches the
+paged cache, frontier/prefix reuse, host checkpoints, the fused append, every prompt/decode
+attention path (including the small-T split-K and DFlash2's non-causal attention), and the
+speculative block-commit semantics. Beellama's port spans ~20 files including
+`ggml-cuda/kvarn.cu` and `fattn-tail.cuh`. Sequence it after the `rk8v4` bisect below.
+
+**GGUF-to-artifact port: feasible, no longer on the critical path.** It was the proposed weight
+fix, and the `int8` control now shows the uniform GSQ3 weights are not the limiting factor.
+Keep it as a documented option (e.g. if the RCO allocation is wanted for other reasons or a
+handover to a mixed-precision artifact is planned): `gguf-py`'s `gguf.quants.dequantize` covers
+every type in the allocation (Q2_K/Q4_K/Q6_K/IQ1_M/IQ2_XXS/IQ2_XS/IQ2_S/IQ3_XXS/IQ3_S/IQ4_XS),
+the published `.rco-allocation.txt` pins the per-tensor map, and a streaming converter can
+re-encode into the registered formats (IQ4_XS/Q4_K -> Q4G64, Q6_K -> Q6G64, IQ3_S/IQ3_XXS ->
+Q3G128, F32/BF16 vectors as-is). It is a second-generation quantization, not verbatim, and the
+IQ2_*/Q2_K/IQ1_M tensors have no registered counterpart (promote to Q3 or add a Q2 format).
+
+**Runtime blocker for the port (2026-10-01).** `artifact::bind_tensor` requires an exact
+per-object `NumericFormat`, and `bindings.cpp` passes `Q3G128_F16S` at every GSQ3 body-parent
+call site, while `variant.cpp`'s per-site workspace queries assume one profile-wide qtype. A
+mixed RCO artifact therefore cannot load under `Qwen38Gsq3`: it needs a new `WeightsProfile`
+(proposed `Qwen38GsqRcoIq3S`, `weights_id` `gsqrco-iq3s`), a per-role format table shared by
+the bindings and the workspace-capacity queries, a `resolve_weights` case in `package.cpp`,
+and the Python source adapter/inventory/verifier. The GGUF download is at
+`/models/qwen3.8-27b-gsq-rco/` (`Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf`, 11.8 GB); the allocation
+map is already on disk. Fit caveat: promoting the IQ2_*/Q2_K/IQ1_M body tensors to Q3 grows the
+artifact, so the sizing pass must precede the C++ work.
+
+**Port sizing pass (2026-10-01, measured against the real file).** The GGUF is complete in
+`/models/qwen3.8-27b-gsq-rco/` (12,120,016,960 B, 866 tensors) and the `mmproj` vision tower is
+fetching. Mapping every text-core object to the GGUF allocation (IQ4_XS/Q4_K -> Q4G64, Q6_K ->
+Q6G64 where present, IQ3_S/IQ3_XXS -> Q3G128, and the IQ2_*/Q2_K/IQ1_M tensors promoted to
+Q3G128; fused objects take the widest contributor) gives a text core of **11.431 GiB against
+the current 10.157 GiB, +1.274 GiB**, with 133 objects at Q4G64 and 189 at Q3G128. All eight
+body sites can reach Q4G64 somewhere, so the new profile's workspace queries can use Q4G64 as
+the site maximum. Reuse plan: only the 322 text-core matrix objects change; vision, DFlash2,
+draft head, MTP and resources are copied byte-for-byte from `out/qwen3_8_27b_gsq3.ninfer`
+(same underlying values), which keeps the port a controlled test of the RCO body allocation.
+Fit: the artifact grows to ~13.7 GiB, so the 100K DFlash2 profile needs a context cut;
+MBPP-scale contexts are unaffected. `gguf` 0.19.0 is installed in the dev venv and the
+reference dequantizer covers all ten types.
