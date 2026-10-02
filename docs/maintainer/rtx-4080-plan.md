@@ -1988,13 +1988,14 @@ equal-budget (same artifact size, better allocation), which keeps the 16 GB fit;
 maintainer scope decision. Cleanest alternative: ask ISTA-DASLab whether a compressed-tensors
 GSQ-RCO checkpoint can be published, which would repack verbatim under D2.
 
-**Recommendation (updated after the KV control).** The KV codec is the cause: `rk4v4-e8` costs
-the 4 points and `int8` recovers them on the same artifact. The RCO/weight campaign and the
-GGUF port above are off the critical path. Next: bisect the codec with `--kv-dtype rk8v4`
-(8-bit K, 4-bit V) on the same harness - 88% points at the 4-bit K, 84% at the 4-bit V - then
-either port KVarN or make the targeted change the bisect names. Until then `int8` is the
-accuracy profile wherever the context fits (~70K text-only with DFlash2, ~79K with MTP on this
-card's startup headroom; MBPP-scale contexts fit trivially).
+**Recommendation (superseded 2026-10-02 by the apples-to-apples MBPP rerun).** The greedy,
+matched-thinking rerun measures `rk4v4-e8` **90%** against beellama `kvarn5/5` 90% and `kvarn4/4`
+92%: the earlier 84/88 separation was a harness artifact (sampling/thinking), and the
+non-monotonic kvarn4/4 > kvarn5/5 ordering is itself within MBPP noise (~1.5-2 points SE). The KV
+codec is not a quality limiter for this artifact; the RCO/weight campaign, the GGUF port, and the
+KVarN port are off the critical path. `rk4v4-e8` is the accuracy profile and already fits the
+DFlash2 100K profile unchanged; the KV byte/fit measurements below stand as capacity facts, not as
+a quality fix.
 
 **Launcher override (2026-10-01).** All four 4080 launchers now take `NINFER_KV_DTYPE`
 (default `rk4v4-e8`) instead of a hardcoded `--kv-dtype`, and echo the served mode;
@@ -2049,24 +2050,55 @@ MBPP on the same artifact, DFlash2 K=7 backend, and harness: `rk4v4-e8` (4.375 b
 `int8` INT8-G64 (8.25 b/v) **88%**, beellama kvarn5/5 (5.375 b/v) 88%. The first reading recorded
 in this file was inverted; the corrected reading exonerates everything held constant between
 the two NInfer runs (weights - uniform GSQ3 vs the RCO GGUF, decode A8, sampling) and leaves
-the 4-bit E8 KV store as the sole cause: with `int8` the uniform GSQ3 artifact matches
-beellama's RCO IQ3_S on MBPP.
+the KV store as the candidate cause, since with `int8` the uniform GSQ3 artifact appeared to match
+beellama's RCO IQ3_S on MBPP. **That reading was harness-confounded; see the apples-to-apples
+rerun below (`rk4v4-e8` 90% against beellama 90-92%).**
 
-**KVarN is now the leading long-context fix.** KVarN is Huawei CSL's variance-normalized KV
-quantization: Hadamard rotation, Sinkhorn-like iterative variance normalization over a
-128-token tile, asymmetric RTN, independent K/V widths 2-8 (~0.375 b/v metadata), with the
-incomplete tile and an exact sink kept in F16 (arXiv 2606.03458; Apache-2.0 vLLM fork; ported
-into `Anbeeld/beellama.cpp`, whose kvarn5/5 is the 88% reference). Its value is exactly what
-the `int8` control demands: 88%-class accuracy below int8 bytes. On this card's 100K accounting
+**rk8v4 bisect and the 100K fit (2026-10-02, maintainer + engine check; quality reading
+superseded below).** First-pass MBPP with only the KV dtype changed: `rk8v4` (8-bit K, 4-bit V)
+88%, `int8` 88%, beellama `kvarn5/5` 88%, against `rk4v4-e8` 84%. That read the 4-bit V as free
+and the four points as the 4-bit K store; the apples-to-apples rerun below withdraws the reading.
+Plane bytes per K or V vector per head (256-dim, four FP16 group-64 scales): `rk4v4-e8` 136 B,
+`rk8v4` K 264 B / V 136 B, `int8` 264 B; with 17 K/V layers (16 full attention plus the MTP layer)
+the per-token rates are 18,496 / 27,200 / 35,904 B, so `rk8v4` costs +8,704 B/token, +0.83 GiB at
+102,400. The boot test on the current 13,330,776,576 B artifact (MTP3 + vision,
+`--host-kv-mib 4096`, RTX 4080) shows that price is not payable at 100K: `rk8v4` fails startup by
+**147 MiB** at `--prefill-chunk 1024` (requested 3,638,545,152 B against 3,484,262,400 B
+available) and by 239 MiB at the launcher's chunk 2688; `rk4v4-e8` starts the same profile with
+703 MiB planned slack, and 96,000 tokens boot with 19 MB slack, putting the MTP `rk8v4` cap near
+**96.7K** (chunk 1024) / 93.2K (chunk 2688). The same arithmetic on DFlash2: `rk8v4` caps in the
+low 70Ks and kvarn5/5 (had it been ported) near 83K, while any byte-neutral codec keeps 100K.
+With `rk4v4-e8` at parity quality (see below), none of this requires a codec change; it only
+bounds future experiments.
+
+**Apples-to-apples MBPP rerun (2026-10-02, maintainer; supersedes the codec-quality readings
+above).** With greedy decoding and the same xhigh thinking level on both engines: `rk4v4-e8`
+**90%**, beellama `kvarn5/5` **90%**, beellama `kvarn4/4` **92%**. The 84/88 separation and the
+codec ordering above were harness artifacts (sampling/thinking), and the kvarn4/4 > kvarn5/5
+inversion is itself within MBPP noise (~1.5-2 points SE). The KV codec is therefore not a quality
+limiter for this artifact; `rk4v4-e8` is at parity with the beellama reference and already fits
+the DFlash2 100K profile, so the KVarN port loses its quality motivation. The plane-byte and fit
+measurements in the note above remain valid as capacity facts.
+
+**KVarN: no longer required (quality motivation closed 2026-10-02).** KVarN is Huawei CSL's
+variance-normalized KV quantization: Hadamard rotation, Sinkhorn-like iterative variance
+normalization over a 128-token tile, asymmetric RTN, independent K/V widths 2-8 (~0.375 b/v
+metadata), with the incomplete tile and an exact sink kept in F16 (arXiv 2606.03458; Apache-2.0
+vLLM fork; ported into `Anbeeld/beellama.cpp`, whose kvarn5/5 is the 88% reference). Its value was
+88%-class accuracy below int8 bytes; the apples-to-apples rerun above closes that demand. On this
+card's 100K accounting
 (`rk4v4-e8` 20.3 KiB/token, `int8` 38.5 KiB/token), kvarn4/4 (4.375 b/v) is about the current
 E8 size (~20.4 KiB/token, so every current profile fits unchanged) and kvarn5/5 (5.375 b/v) is
-~25.1 KiB/token, +0.47 GiB at 100K, inside the DFlash2 profile's 625 MiB free + 78 MiB slack
-but tight. The port is a cache-architecture change, not a codec swap: the encode normalizes a
-whole tile in two passes and must keep the open tile exact until it seals, which touches the
+~25.1 KiB/token, +0.47 GiB at 100K; that fits the MTP 100K profile but not DFlash2, whose 100K
+profile keeps only ~41 MiB planned slack and caps kvarn5/5 near 83K (see the fit note above). The
+port is a cache-architecture change, not a codec swap: the encode normalizes a whole tile in two
+passes and must keep the open tile exact until it seals, which touches the
 paged cache, frontier/prefix reuse, host checkpoints, the fused append, every prompt/decode
 attention path (including the small-T split-K and DFlash2's non-causal attention), and the
 speculative block-commit semantics. Beellama's port spans ~20 files including
-`ggml-cuda/kvarn.cu` and `fattn-tail.cuh`. Sequence it after the `rk8v4` bisect below.
+`ggml-cuda/kvarn.cu` and `fattn-tail.cuh`. With `rk4v4-e8` at 90% and fitting every target
+profile, nothing here is on the critical path; revisit only if a new capacity or quality
+requirement names it.
 
 **GGUF-to-artifact port: feasible, no longer on the critical path.** It was the proposed weight
 fix, and the `int8` control now shows the uniform GSQ3 weights are not the limiting factor.
