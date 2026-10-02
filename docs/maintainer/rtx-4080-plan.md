@@ -2171,3 +2171,206 @@ and `docs/cli.md`/`docs/serving.md` drop the disabled caveat.
 report added non-tie flips under the scoring oracle. They are the accepted session-13..17 class
 (the session-16 decode A8 profile drifts MTP-only bf16 too), not wide-window corruption; the
 default product and test route (graphs on, max 15) passes.
+
+### Staging-ceiling audit: the Q3 memory pattern is not the wall (2026-10-02, session 20)
+
+**Question.** The session-13 decode audit read the Q3 body at ~380-445 GB/s and named the small-T
+staging structure (32 rows x 192 B stages at a 1920 B row stride, 2 CTAs/SM, 3-deep cp.async ring)
+as the limiting pattern. This session tested that hypothesis directly: a throwaway probe
+(`profiles/bench/5c-decode-levers/staging_probe.cu`) runs the production staging pipeline with the
+decode/MMA/activation removed and sweeps stage width (192/384 B), ring depth (2/3/5), rows per
+CTA (16/32/64), resident CTAs per SM (1..5), warp-private vs CTA-shared pipelining, and full-row
+bursts, against linear-read controls; the production kernel was re-measured through
+`ninfer_linear_bench` with `flush_l2` temporarily changed from a 256 MiB memset to a read flush
+(patch reverted after the run).
+
+**Probe rates (34816 x 5120 codes + scales = 69.6 MB/pass, median of 30, clean L2 via read flush).**
+
+| config | median | model GB/s |
+|---|---:|---:|
+| read_linear float4 (occupancy grid, 456 CTAs) | 103.4 us | 673 |
+| stage_linear cp.async 4 KB stages | 104.3 us | 668 |
+| stage_shared 192 B ring3 32r 2cta (production shape) | 107.5 us | 648 |
+| stage_shared 192 B ring3 32r 1cta / maxcta (5/SM) | 107.5 us | 648 |
+| stage_shared 384 B ring2/3 / ring5 / 16r / 64r | 107.5 us | 648 |
+| stage_warp 384 B ring3 4r/warp (no block barriers) | 107.5 us | 648 |
+| row_burst 16r / 32r full-K | 103.4 / 102.5 us | 673 / 679 |
+| stage_shared 192 B + the production A8 decode loop | 109.6 us | 636 |
+
+**Flush-mode effect (same kernels, mode 0 = memset flush, mode 1 = read flush).** read_linear 466
+vs 646 GB/s; stage_shared 453 vs 627; the production Q3 A8 kernel in `ninfer_linear_bench` T=2/4
+156.7 -> 140.3 us and T=5..8 157.7-158.7 -> 148.5-150.5 us; T=9..16 unchanged at 277.5 us. The memset flush
+leaves a dirty L2 whose writebacks share DRAM with the timed stream and depresses streaming numbers
+by 10-27% (the `a8small_34816x5120_cleanflush.csv` keeps the clean run).
+
+**Conclusions.**
+
+1. The staging structure is not the wall. Every structural variant lands within 1-2% of the pure
+   float4 read (673 GB/s), and the production shape is only 4% below it. Restaging (wider stages,
+   deeper ring, more CTAs, row bursts, warp-private) is a dead end.
+2. The production A8 decode is effectively free once the pipeline overlaps: staging 107.5 ->
+   staging + decode 109.6 us (+2%).
+3. The production kernel's remaining cost is the MMA/x-staging/reduction path plus the separate
+   `a8_g64_quantize` launch: 140.3 us clean against 108-110 us of staging + decode, i.e. ~32 us
+   per big parent, not the weight stream.
+4. `ninfer_linear_bench`'s memset flush understates streaming kernel rates, so recorded absolute
+   GB/s (the 445 "wall") are not kernel ceilings. Engine-level Q3 remains ~23 ms/round (~413 GB/s)
+   against ~16 ms at the clean op-level rate; a fresh nsys on the current build must split that
+   gap between kernel consume, shape mix, quantize launches and wave tails.
+5. The T=9..16 double tile is now fully explained: 2 x the ~140 us pipeline (277 measured), so a
+   native 16-column single-pass tile is worth ~135 us per double-tile call (K=15 Q3 ~43 -> ~21 ms).
+
+**Plan change.** The session-13 "restage the A8 tall/small-T code path" candidates are withdrawn.
+Decode work is redirected to: (a) attribute and cut the ~32 us consume (fuse/overlap the activation
+quantize, x staging, MMA/epilogue) with a fresh nsys on the current build; (b) the native T=9..16
+single-pass tile (DFlash2 K=15 / wide windows); (c) the Q4 main-head single-pass at T=8
+(`q4_dispatch.cpp` n=248320 takes `launch_q4_simt_r8_c4`, two 4-column passes; the draft-head
+small-T route is single-pass). Recommendation for the maintainer: give `ninfer_linear_bench` a
+read-flush variant (or switch the default) so streaming measurements stop carrying the dirty-L2
+penalty.
+
+**Evidence.** `profiles/bench/5c-decode-levers/staging_probe.cu`,
+`staging_probe_clean_vs_dirty.log`, `a8small_34816x5120_cleanflush.csv`. Probe command:
+`nvcc -O3 -std=c++17 -arch=sm_89 stage_probe.cu -o stage_probe && ./stage_probe 30`.
+
+### Decode consume attribution and the A16 GDN stragglers (2026-10-02, session 21)
+
+Step 1 from the session-20 redirect. Fresh nsys captures on the current build at 8K, tiled corpus,
+`--cuda-graph-trace=node`: `profiles/nsys/session21-{dflash7-8k,mtp3-8k,linprof-q3a8-t4}.*`
+(the `QdstrmImporter` needs `libdw1t64`, reinstalled after the image rebuild; container change only).
+Per-round counts are keyed by the once-per-round selector/argmax kernels (76 DFlash2 rounds, 74
+MTP3 rounds over the two bench runs).
+
+**One public Q3 A8 call (N=34816, K=5120, T=4):** `a8_g64_quantize_kernel` **1.66 us** +
+`q3_small_t_a8_mma_kernel` **137.49 us** (grid 1088, 256 threads, 68 registers). The separate
+activation quantize is 1.2% of the call and is not the consume gap. Against the session-20 probe
+(staging 107.5 us, staging + decode 109.6 us) the remaining ~30 us is the in-kernel x staging /
+ldmatrix / MMA / reduction / epilogue path.
+
+**DFlash2 K=7 per decode round** (round = 32.9 ms, 134.6 tok/s at 4.43 tok/round):
+
+| route | calls | avg | ms/round |
+|---|---:|---:|---:|
+| A8 SwiGlu gate_up (grid 1088) | 64 | 149.6 us | 9.57 |
+| A8 plain N=5120 (grid 160) | 128 | 68.6 us | 8.78 |
+| A8 plain N=7168 (grid 224) | 32 | 33.6 us | 1.08 |
+| **A16 gdn/value_z N=12288 (grid 384)** | 48 | 70.1 us | 3.36 |
+| **A16 gdn/query_key N=4096 (grid 128)** | 48 | 25.7 us | 1.23 |
+| a8 quantize (decode) | 224 | ~1.7 us | 0.38 |
+| **Q3 body total** | 320 | | **24.4** |
+
+MTP3 (T=4) per round: A8 SwiGlu 10.20 + A8 plain(N=5120) 9.47 + A8 plain(N=7168) 1.16 + A16
+grid384 3.44 + A16 grid128 1.35 + quantize 0.4 = **25.6 ms** of a 30.5 ms round.
+
+**Findings.**
+
+1. The engine's Q3 kernels run at the clean op-bench rates (SwiGlu 149.6 us in-engine vs 150.5 us
+   clean). There is no engine-level Q3 penalty; the session-20 "~23 ms vs ~16 ms" comparison used
+   the staging-only floor, which is not the kernel floor while the consume is serialized. The
+   current ceiling is ~24 ms/round until the consume is cut.
+2. The remaining per-parent consume is ~30 us (T=4) to ~40 us (T=8 SwiGlu) over staging + decode,
+   entirely inside `q3_small_t_a8_mma_kernel`. A probe iteration adding x staging then the MMA path
+   would split it; the fix candidates are a warp-specialized pipeline or a leaner consume.
+3. **30% of decode Q3 calls are A16 by construction.** The GDN conv record/snapshot projections on
+   the split Q3 payload run A16: `gdn_input_proj_conv_record`'s Q3 two-parent branch hardcodes
+   `LinearPolicy::A16Only` (`src/ops/wrapper/gdn_input_proj.cpp:1112`; the snapshot branch at 1178),
+   and `Variant::gdn_input_projection_record/_snapshot` call the no-policy overloads
+   (`src/targets/qwen3_6_27b/impl/variant.cpp:276/301`), while the fused payload path passes
+   `text_policy(...)`. Op bench at T=8, A16 -> A8: N=4096 32.8 -> 29.7 us, N=12288 77.8 -> 67.6 us.
+   Threading `kQ3TextPolicy` through the split record/snapshot forms and their workspace capacity
+   queries should return ~0.6 ms/round on DFlash2 K=7 (~2%), at the cost of the decode-A8 numerics
+   class already accepted in session 16.
+4. **The small-N parents lose ~2-3.5 ms/round to wave quantization.** The A8 small-T kernel runs
+   2 CTAs/SM (42,112 B static smem at StageTokens=4, 48,640 B at 8; 152 resident slots). The
+   per-launch histograms are bimodal at almost exactly the two-wave times: N=5120/grid 160 (1.05
+   waves) splits into ~35 us (K=6144) and ~93 us (K=17408) on DFlash2 (MTP3: 34/89 us), against
+   single-wave ideals of ~24.4/69.0 us at the kernel's own 504 GB/s big-shape rate; N=7168/grid 224
+   (1.47 waves) is ~31.6 us against ~27.5. That is 64 N=5120 layers + 32 N=7168 calls per round,
+   ~2-3.5 ms of the 32.9 ms DFlash2 round. Fitting 3 CTAs/SM (<=34,133 B: 2-buffer ring at
+   StageTokens=4; 2-buffer ring + half decoded tile at StageTokens=8) removes the second wave with
+   no arithmetic change; the session-20 probe showed ring 2 stages as fast as ring 3 and occupancy
+   irrelevant for a full-wave shape.
+
+**Next.** (a) the Q4 main-head single-pass at T=8 (extend the Q4 small-T geometry to n=248320; the
+session-21 ranking's item 3); (b) split the in-kernel consume with one more probe (x staging vs
+MMA) and try a warp-specialized/leaner consume; (c) the T=9..16 single-pass tile for K=15.
+
+### Occupancy/wave-tail experiment: rejected (2026-10-02, session 22)
+
+Session-21 item 1. Tested in `q3_rowsplit_small_t_a8_mma.cuh` (working tree only, reverted): two code
+buffers plus a 16-row half decoded tile consumed in two m16 phases, taking static shared memory from
+42,112/48,640 B to 25,344/29,696 B and occupancy from 2 to 3 CTAs/SM (228 slots). The occupancy probe
+confirmed 3 blocks/SM for both StageTokens variants at 72-80 registers, and the A8 oracle suites
+passed, so the restructure was arithmetically sound.
+
+Measured, then reverted:
+
+- Op bench (dirty flush, 34816x5120): T=4 156.7 -> 158.7 us; T=8 158.7 -> 162.8 us.
+- Engine nsys (DFlash2 K=7, 8K, `profiles/nsys/session22-dflash7-8k.*`): Q3 A8 body 19.43 -> 21.18
+  ms/round (+9.0%); big parent median 138.2 -> 140.4 us; N=5120 parents 35.8/93.0 -> 36.8/97.8 us;
+  N=7168 31.6 -> 31.8 us. The A16 parents were unchanged (24.5/65.5 us).
+
+Conclusion: the kernel is per-CTA issue/latency-bound, not wave-bound. Three CTAs/SM time-slice the
+same SM throughput (aggregate ~430 GB/s is unchanged), while the two-deep ring and the extra
+barriers cost more than the removed partial wave. The bimodal small-parent times are real, but the
+tail is not reachable by trading ring depth for occupancy. The kernel is back to the committed
+revision (`git checkout`; tests pass). Session-21 item 1 is closed.
+
+### GDN record/snapshot A8 policy threading (2026-10-02, session 22, item 4)
+
+Landed: the split Q3 GDN conv snapshot/record projections now take a compute policy. New
+policy-taking two-parent overloads in `include/ninfer/ops/gdn_input_proj.h`; the wrapper's Q3
+branches use the passed policy (`src/ops/wrapper/gdn_input_proj.cpp`); the Q3 branches of the
+snapshot/record capacity queries admit A16Only/AllowA8; `Variant::gdn_input_projection_record` and
+`_snapshot` and their workspace helpers pass `kQ3TextPolicy`. The no-policy two-parent forms remain
+as A16Only delegates. `ninfer_gdn_input_proj_conv_record_test` now runs both policies;
+record/snapshot/replay-fold suites pass. Engine capture (`profiles/nsys/session23-dflash7-8k.*`):
+the A16 small-T kernel no longer appears in decode; grid128 24.5 -> 21.3 us, grid384 65.5 -> 56.1 us,
+Q3 body 24.03 -> 23.33 ms/round (-0.70 ms; +2.2% on the 32.9 ms DFlash2 K=7 round).
+
+**Numerics decision point.** A8 quantizes the projection activation per token and 64-code group
+(about 0.4% per group) while A16 used bf16 activations; both keep the weight codes exact int8 with
+fp32 group scales. It is the same documented A8 contract already covering the main decode linears
+since session 16. On the real artifact (DFlash2 K=7, `scenario_code_python.json`, greedy) the A8
+record changes the output hash 54c59149db5f -> 2eb9e160cb96; the only text difference is the first
+sentence's near-tie phrase ("understand what I'm working with" vs "...what's already there"), and
+the rest, including the code block, is byte-identical. That is the session-16 MTP3 near-tie class
+reached by DFlash2 K=7, and the trade is explicit: keep the +0.70 ms/round with the drift, or revert
+the two call sites to A16Only and keep DFlash2 K=7 at the reference hash. MBPP has not been rerun
+with the record path on A8.
+
+**Reverted 2026-10-02 (maintainer decision).** The kernel gain was real, but the end-to-end trade
+was not acceptable: the A8-record trajectory lost acceptance length on the code scenario
+(3.82 -> 3.42 tok/round, within sampling noise at that length but far exceeding the +0.70 ms/round
+kernel gain if it persisted). The split call sites and their workspace helpers are back to
+`A16Only`, and the policy-taking two-parent overloads, the capacity gates and the two-policy test
+case are reverted with them - the path needs no policy plumbing until a measured acceptance A/B
+justifies A8. Verified: `ninfer_gdn_input_proj_conv_record_test`,
+`ninfer_gdn_input_proj_conv_snapshot_test` and `ninfer_gdn_replay_fold_test` pass, and DFlash2 K=7
+on the code scenario is back to the reference output `54c59149db5f` (42 tokens, 40.3% acceptance,
+118.6 tok/s).
+
+### Q4 main-head single-pass at T=8 (2026-10-02, session 22, item 3)
+
+Landed. `Q4DraftHeadGeometry<InputRows>` became `Q4SmallTGeometry<OutputRows, InputRows>` (the old
+name is the 131072-row alias); the small-T launcher gained a 248320-row geometry and was renamed
+`launch_q4_small_t_mma` (`q4_launch.h`, `q4_dispatch.cpp`). The main head now selects it for T=2..8;
+T=9..15 keep `simt_r8_c4`, T=16 c8, T>=17 the tall MMA. `ninfer_linear_q4_a16_test` passes (its
+[248320,5120] cases cover T=2/3/4/8).
+
+Evidence:
+
+- Op bench (dirty flush, 248320x5120): T=8 2338.8 -> 1185.8 us (2.0x, 573 GB/s); T=4 1201.2 ->
+  1136.6 us; T=5/6/7 are single-pass now as well. T=9..10 unchanged (still three simt tiles).
+- Engine nsys (`profiles/nsys/session24-dflash7-8k.*`): the 31040x2 simt head launch (2245 us) is
+  replaced by a 15520x1 small-T launch at 1074.6 us, -1.17 ms/round; Q4 total 7.78 -> 6.87 ms/round.
+- DFlash2 K=7 code scenario, greedy: 118.6 -> 122.5 tok/s (+3.3%) at the same acceptance (40.3%,
+  3.82 tok/round) and the same output hash `54c59149db5f` - no trajectory change.
+
+Follow-up not taken: the T=9..16 head window (K=15, wide n-gram) still runs the two-tile c8 route;
+extending the main-head launcher table to 16 columns would make it single-pass too.
+
+Integration evidence: `ninfer_qwen3_8_27b_dflash2_real_test 7 1 1 1` (K=7, B=1, graph, optimized)
+passes with `accepted=20/20`; the default B=8 argument aborts on the runtime reservation, which is the
+pre-existing 16 GB fit limit, not this change. Full rebuild plus `ctest` exit 0 with the same 13
+expected skips and no `LastTestsFailed.log` update.
