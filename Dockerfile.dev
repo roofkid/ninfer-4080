@@ -34,7 +34,7 @@ FROM nvidia/cuda:13.1.2-devel-ubuntu24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG NODE_MAJOR=22
-ARG KETCH_VERSION=0.17.0
+ARG KETCH_VERSION=0.18.1
 
 # Engine build/runtime dependencies (mirrors ./Dockerfile) plus the development
 # tooling the plan's stages need: ccache for the repeated CUDA builds, rg/fd/jq for
@@ -110,6 +110,7 @@ RUN curl -fsSL https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
         PyYAML \
         rich \
         tqdm \
+        gguf \
     && rm -rf /root/.cache/uv
 
 # Toolchain selection: exactly the shape docs/rtx-3090-linux.md prescribes, with
