@@ -61,14 +61,15 @@ deleted when the work finishes. Three items belong in this ledger:
   (tg512 53.2-53.9 tok/s at the same acceptance). The tall kernel at decode widths is slower than
   the staged small-T GEMV, so the prefill route stays the tall engine; session 16 added a separate
   small-T A8 engine for those widths.
-- **5c.3 n-gram drafts (partial port, 2026-09-27; wide verify window disabled).** Ported from
-  `375542a`, `535f9c1`, and `be3b680`: `ngram_pool.h`/`ngram_policy.h` with the policy unit test,
-  the `mtp_round` verify-width split and every engine/round-state/workspace/ReplaySSM consumer,
-  chaining in `decode_mtp_batch`, the CLI/serve flags, request-log schema 21, and the metrics
-  counters. The narrow path is lossless and the real test passes. The wide verify window is off
-  (the planner keeps `verify_window == draft_window`) because a wide round on the real artifact
-  produced a wrong correction logit at one column; the plan's Stage 5c.3 result block records
-  the isolated round and the components ruled out. Do not re-enable before that is explained.
+- **5c.3 n-gram drafts (2026-09-27, session 7; wide verify window re-enabled 2026-10-02,
+  session 19).** Ported from `375542a`, `535f9c1`, and `be3b680`: `ngram_pool.h`/`ngram_policy.h`
+  with the policy unit test, the `mtp_round` verify-width split and every engine/round-state/
+  workspace/ReplaySSM consumer, chaining in `decode_mtp_batch`, the CLI/serve flags, request-log
+  schema 21, and the metrics counters. The wide window was off while a wide round on the real
+  artifact produced a wrong correction logit at one column; session 15 traced that to bf16-ulp
+  trajectory sensitivity under lossy KV rather than a kernel defect, and session 19 restored
+  `verify_window = ngram.max_drafts` in the planner. The real test requires at least one wide round
+  and passes the bf16 tie criterion.
 
 - **DFlash2 Q4 companion (plan option 4's matrix half, landed 2026-09-28, session 12).** The gsq3
   identity requantizes the 21 DFlash2 companion matrices from `W8G32_F16S` to `Q4G64_F16S` (the

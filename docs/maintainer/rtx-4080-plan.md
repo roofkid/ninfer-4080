@@ -28,9 +28,10 @@ still need a tail-aware pass (§11). **D10's measured axes are now met** (shallo
 decode lead, the Q3 small-T GEMV schedule port (§11 decode bandwidth audit), or Stage 6
 publication. Session 7 then ported the whole 5c.3 n-gram surface (pool/
 policy, verify-window split, CLI/serve flags, log schema 21, metrics, real lossless test) but
-found a wrong correction logit in the wide verify route on the real artifact; **wide n-gram
-rounds are disabled in the engine (the planner keeps `verify_window == draft_window`) with the exact
-the ruled-out components recorded in the 5c.3 result block, so the enabled path stays lossless.
+found a wrong correction logit in the wide verify route on the real artifact, so the wide n-gram
+rounds stayed disabled (the planner kept `verify_window == draft_window`). Session 15 traced the
+flips to bf16-ulp trajectory sensitivity rather than a kernel defect, and session 19 re-enabled the
+window (see the Stage 5c.3 block and the session-19 record in §11).
 The full `ctest` set passes on the current build (127 tests, 115 passed, 12 expected skips, 0
 failed).
 **Session 8 (2026-09-27) took the decode-bandwidth audit's top item: the Q3 small-T GEMV now
@@ -96,6 +97,13 @@ the same engine serves 2..16 columns with the documented activation quantization
 -15..-17% against A16, greedy engine +10..13%, DFlash2 K=7/K=15 texts byte-identical). §11 has the
 design, the fixed group-major scale-staging bug, and the MTP3 near-tie drift that the decode A8
 profile introduces.**
+
+**Session 19 (2026-10-02) re-enabled the 5c.3 wide n-gram verify window** (the planner now sets
+`verify_window = ngram.max_drafts` when `--ngram chain` is enabled) and made the real test require a
+wide round. On bf16 with the default graph route: 80 wide rounds of 560, 0 n-gram-added divergences,
+PASS; the structured-JSONL CLI scenario drops 68 -> 58 decode rounds (129.1 -> 139.8 tok/s) with
+byte-identical output. The `--no-cuda-graph` route still shows the session-13..17 trajectory-flip
+class; §11 has the record.
 
 Environment for this plan: the `Dockerfile.dev` image in this repository. It is the sandbox the
 maintainer hands to pi, with the host RTX 4080 passed through:
@@ -595,8 +603,7 @@ columns to the folded SwiGLU problem and reports zero workspace for that range. 
   `examples/cli/messages/scenario_code_python.json` (or a committed edit-style transcript)
   shows a real acceptance-length gain; prose decode unchanged within noise; ctest clean.
 
-**5c.3 result (2026-09-27, session 7): the port is in place but its wide verify window is
-disabled pending a fix.** Landed: `ngram_pool.h`/`ngram_policy.h` + `test_ngram_policy`, the
+**5c.3 result (2026-09-27, session 7; wide window re-enabled session 19).** Landed: `ngram_pool.h`/`ngram_policy.h` + `test_ngram_policy`, the
 `535f9c1` verify-window split (op contract, kernel, launcher, wrapper, oracle test, round state,
 envelope/profile/workspace/record plumbing), the engine chaining in `decode_mtp_batch`, the CLI
 and serve flags, request-log schema 21 with the n-gram counters, and the real lossless test
@@ -614,9 +621,9 @@ SwiGLU GEMV at T=5/6/7 (new cases pass), the W8 lm_head at T=7 (test covers 1..1
 record width selection (verified by construction), CUDA graphs (fails without them), OOB memory
 and shared-memory races (compute-sanitizer memcheck and racecheck: 0 errors). The remaining
 suspect area is the assembled multi-column verify state (a single-column hidden corruption).
-The engine now plans `verify_window == draft_window`, so the wide graph family and record planes are
-test state that a round verifies at most the MTP width. Do not re-enable wide rounds until the
-column-level corruption is explained.
+The session-7 engine planned `verify_window == draft_window`, so the wide graph family and record
+planes were not materialized and a round verified at most the MTP width; session 19 restored
+`verify_window = ngram.max_drafts` and the real test requires a wide round.
 
 **5c.4 Prompt attention worker V-dequant (last, modest).**
 
@@ -770,8 +777,8 @@ DFlash2 on the 4080; multi-lane and preemption; the 5090 tree; Windows.
    DFlash2 K=15 39.6 -> 53.0 tok/s) and an A8 profile of the same engine serves 2..16 columns
    (op level -15..-17%, greedy engine +10..13%, DFlash2 K=7/K=15 texts byte-identical). The decode
    A8 profile changes decode numerics by design and the MTP3 greedy text drifts one phrase at a
-   near-tie, which is the one open maintainer call. 5c.3 remains gated on the wide-verify
-   corruption, Stage 6 publication is otherwise unblocked, and 5c.5 (DFlash2) is past its artifact
+   near-tie, which is the one open maintainer call. 5c.3's wide verify window is re-enabled (session
+   19); Stage 6 publication is otherwise unblocked, and 5c.5 (DFlash2) is past its artifact
    gate: session 11 (§11) landed the
    companion in the GSQ3 identity and its K=7 profile at 28K (vision) / 56K (text) context, which
    is greedy-lossless; session 12 (§11) then requantized the companion matrices to Q4G64_F16S,
@@ -780,8 +787,8 @@ DFlash2 on the 4080; multi-lane and preemption; the 5090 tree; Windows.
    the pre-existing K=5 narrow-window divergence is documented and deferred.
    Session 15 (§11) closed the wide-verify blocker as trajectory sensitivity rather than a kernel
    defect, landed the RK4V4E8 oracle coverage + the rotated-V double-rounding fix, and left the
-   wide-window re-enable and DFlash2 K=5 as maintainer calls. The landed work is uncommitted in the
-   working tree until the maintainer asks for a commit.
+   wide-window re-enable (landed in session 19) and DFlash2 K=5 as maintainer calls. The landed work
+   is uncommitted in the working tree until the maintainer asks for a commit.
 
 ## 11. Stage log
 
@@ -1143,9 +1150,11 @@ greedy.{out,err}`.
   decode lead, or Stage 6 publication. The tail-aware split noted in §6 remains the optional
   fix for the mid-width regressions.
 
-### Stage 5c.3 — n-gram drafts (2026-09-27, session 7, blocked on a wide-verify bug)
+### Stage 5c.3 — n-gram drafts (2026-09-27, session 7; wide window re-enabled session 19)
 
-The port itself is complete and tested except for the wide verify window:
+The port itself is complete and tested; **the wide verify window is enabled** (session 19 restored
+`verify_window = ngram.max_drafts` in the planner after session 15 explained the session-7 failure
+as trajectory sensitivity; the real test now requires a wide round). Original session-7 record:
 
 - `ngram_pool.h`, `ngram_policy.h`, `test_ngram_policy` (pool, policy, source attribution, and
   round-width policy) pass.
@@ -1161,7 +1170,7 @@ The port itself is complete and tested except for the wide verify window:
 - `tests/targets/qwen3_6_27b/test_engine_ngram_real.cpp` passes on the real artifact with 0 added
   divergences and the speculative rounds exercised.
 
-**The wide verify window is disabled.** With it enabled, one wide round on the real artifact
+**The session-7 wide verify window was disabled.** With it enabled, one wide round on the real artifact
 produced a wrong correction token:
 
 - Round E=467, width 7, extent 6, proposal 3. verify ids `[5653 1870 1137 5480 2923 16 23]`,
@@ -1178,9 +1187,8 @@ produced a wrong correction token:
   corruption in the T=7 verify stack. A minimal repro was used during the investigation: one engine,
   prompt 3, `--ngram-max 6`, graphs off, 384 tokens; the divergence is at generated index 311. That
   probe was temporary and has been removed.
-- The planner keeps `verify_window == draft_window` (wide planes are not materialized); the real
-  and docs state that a round verifies at most the MTP width. Full `ctest`: 127 tests, 115 passed,
-  12 expected skips, 0 failed.
+- The planner kept `verify_window == draft_window` (wide planes were not materialized) until session
+  19. The historical `ctest` at the time: 127 tests, 115 passed, 12 expected skips, 0 failed.
 
 Resume options for the next session: (a) explain the column-2 corruption (e.g. by dumping the
 per-layer hidden states of the failing verify round and comparing them with a prefill of the same
@@ -1600,10 +1608,10 @@ the 96 B whole-group stages that already reach ~450 GB/s in the small-T decode k
    session 10 named; upper bound is the ~450 GB/s staging ceiling unless the stage width grows
    with it (e.g. four-group 192 B stages).
 2. Decode: small-T T=9..16 route - removes the 2.2x cliff that makes DFlash2 K>7 and the
-   disabled wide n-gram verify window expensive.
+   previously disabled wide n-gram verify window expensive (both landed, sessions 16 and 19).
 3. Decode: ~~finish the 5c.3 corruption root cause~~ **DONE (session 15): the flips are
    trajectory sensitivity, not a defect — see the session-15 section at the end of §11.** The
-   n-gram wide window and DFlash2 K=5 are now maintainer calls, not blocked investigations.
+   n-gram wide window was a maintainer call and is re-enabled in session 19; DFlash2 K=5 stays open.
 4. Prefill: restage the A8 tall code path with whole-group cp.async (48-192 B per row) instead of
    the 24 B register loads; a 2x kernel gain would take pp100000 from 1675 to ~2300 tok/s.
 5. Prefill: prompt attention (42% of 100K) runs at ~17-20% of tensor peak with the 5c.4 port still
@@ -1656,7 +1664,7 @@ trusted on this KV format.
 
 **Superseded by session 15:** the corruption is trajectory sensitivity, not a split/append/codec
 defect; see "Wide-verify root cause: trajectory sensitivity" at the end of §11. The wide window
-can be re-enabled as a maintainer decision under the existing bf16 tie criterion.
+was re-enabled in session 19 under the existing bf16 tie criterion.
 
 ### RK4V4E8 executed-path correction (2026-09-28, session 14)
 
@@ -2094,3 +2102,40 @@ draft head, MTP and resources are copied byte-for-byte from `out/qwen3_8_27b_gsq
 Fit: the artifact grows to ~13.7 GiB, so the 100K DFlash2 profile needs a context cut;
 MBPP-scale contexts are unaffected. `gguf` 0.19.0 is installed in the dev venv and the
 reference dequantizer covers all ten types.
+
+### N-gram wide verify window re-enabled (2026-10-02, session 19)
+
+**Change.** `make_sequence_planner_impl` sets the MTP verify window to `ngram.max_drafts` when the
+n-gram chain is enabled and to `draft_tokens` otherwise, so the wide graph family and record planes
+session 7 planned are materialized. The session-7 failure was closed as bf16-ulp trajectory
+sensitivity in session 15; this is the maintainer's re-enable decision. `program_impl.h`'s stale
+"disabled" comment is removed, `test_engine_ngram_real.cpp` now requires at least one wide round,
+and `docs/cli.md`/`docs/serving.md` drop the disabled caveat.
+
+**Evidence** (`out/qwen3_8_27b_gsq3.ninfer`, RTX 4080; logs `/tmp/s19_ngram_*.log`,
+`/tmp/s19_jsonl_*.err`, `/tmp/s19_ctest.log`):
+- `ninfer_qwen3_6_27b_ngram_real_test`, bf16, default graphs on: **80 wide rounds of 560**, 958
+  n-gram drafted / 555 accepted, **0 n-gram-added divergences** over MTP, two fresh engines
+  token-identical, PASS. The n-gram and MTP-only runs' first divergences agree on all six prompts.
+- Non-default overrides expose the session-13..17 bf16-ulp trajectory class. `NINFER_NGRAM_GRAPH=0`
+  at max 15: 80 wide rounds of 563, 958/555, **1 added** (prompt 2 token 42, gap 5 nats); max 6 with
+  graphs on: 126 wide rounds of 619, **1 added** (prompt 3 token 322, gap 16.4); max 6 graphs off:
+  **2 added** (prompt 2 gap 5, prompt 3 gap 16.4). The n-gram run's own first divergences are
+  identical in both graph modes at max 15; only the narrow MTP baseline's first flip moves (token 42
+  with graphs on, token 270 with graphs off). The wide round's partition perturbs the state at a
+  near-tie, and the scoring
+  oracle evaluates the reference prefix, so a token chosen from a different basin can appear as a
+  gross gap. The committed gate runs the default route (graphs on, max 15), which passes.
+- `rk4v4-e8` (report-only): 65 wide rounds of 608, 778 drafted / 431 accepted, 0 added divergences,
+  PASS.
+- CLI `examples/cli/messages/scenario_structured_jsonl.json`, greedy, bf16, 256 tokens: n-gram
+  58 rounds / 139.8 tok/s against MTP 68 rounds / 129.1 tok/s (-14.7% rounds, +8.3% decode), outputs
+  byte-identical (`0f7c070916968adb5456c23e9d3fd718`). The code scenario's pool barely fires (1 wide
+  round, 0 accepted) because its output is novel code; the pool's buy is restated structure.
+- Full `ctest`: **133 tests, 120 passed, 13 expected skips, 0 failed** (unchanged from session 16);
+  `git diff --check` clean.
+
+**Residual.** Non-default decode routes (`--no-cuda-graph`, and `--ngram-max 6` on this build) can
+report added non-tie flips under the scoring oracle. They are the accepted session-13..17 class
+(the session-16 decode A8 profile drifts MTP-only bf16 too), not wide-window corruption; the
+default product and test route (graphs on, max 15) passes.
