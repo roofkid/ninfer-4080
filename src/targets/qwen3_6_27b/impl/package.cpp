@@ -98,6 +98,9 @@ Package::WeightsProfile Package::resolve_weights(const artifact::ArtifactIdentit
     if (identity.model_id == qwen3_8_model_id && identity.weights_id == "gsq3") {
         return WeightsProfile::Qwen38Gsq3;
     }
+    if (identity.model_id == qwen3_8_model_id && identity.weights_id == "gsqrco-iq3s") {
+        return WeightsProfile::Qwen38GsqRcoIq3S;
+    }
     throw std::runtime_error("artifact identity '" + identity.model_id + "/" + identity.weights_id +
                              "' is not supported by target '" + std::string(target_key) + "'");
 }

@@ -45,6 +45,7 @@ public:
 
     ObjectHandle require_tensor(std::string_view name, NumericFormat format, StorageLayout layout,
                                 std::span<const std::uint64_t> shape);
+    [[nodiscard]] NumericFormat tensor_format(std::string_view name) const;
     ObjectHandle require_resource(std::string_view name, ResourceEncoding encoding);
 
     [[nodiscard]] bool contains(std::string_view name) const noexcept;

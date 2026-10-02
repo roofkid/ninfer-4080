@@ -147,6 +147,11 @@ def _attention_indices() -> tuple[tuple[int, ...], tuple[int, ...]]:
     return _qproj_rows(False), _qproj_rows(True)
 
 
+def attention_indices() -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Row indices selecting the query and gate parts of an interleaved q_proj."""
+    return _attention_indices()
+
+
 def _layer_prefix(layer: int) -> str:
     return f"model.language_model.layers.{layer}."
 

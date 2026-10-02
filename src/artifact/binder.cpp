@@ -76,6 +76,18 @@ bool Binder::contains(std::string_view name) const noexcept {
     return reader_.find(name) != nullptr;
 }
 
+NumericFormat Binder::tensor_format(std::string_view name) const {
+    const ObjectDescriptor* object = reader_.find(name);
+    if (object == nullptr) {
+        throw ArtifactError("required artifact object is missing: " + std::string(name));
+    }
+    const auto* tensor = std::get_if<TensorDescriptor>(object);
+    if (tensor == nullptr) {
+        throw ArtifactError("required tensor is a resource: " + std::string(name));
+    }
+    return tensor->format;
+}
+
 const ObjectDescriptor& Binder::descriptor(ObjectHandle handle) const {
     if (handle.index >= reader_.objects().size()) {
         throw ArtifactError("artifact object handle is out of range");
