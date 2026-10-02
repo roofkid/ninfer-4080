@@ -21,12 +21,16 @@ struct Q4SmallTMmaIdentityRows {
     }
 };
 
-template <int InputRows>
-struct Q4DraftHeadGeometry {
-    static constexpr int kOutputRows   = 131072;
+template <int OutputRows, int InputRows>
+struct Q4SmallTGeometry {
+    static constexpr int kOutputRows   = OutputRows;
     static constexpr int kInputRows    = InputRows;
-    static constexpr int kGroupsPerRow = kInputRows / 64;
+    static constexpr int kGroupsPerRow = InputRows / 64;
 };
+
+// The 131072-row DFlash2 draft/selector head.
+template <int InputRows>
+using Q4DraftHeadGeometry = Q4SmallTGeometry<131072, InputRows>;
 
 struct Q4DraftSmallTSchedule {
     static constexpr int kKWarps            = 8;
