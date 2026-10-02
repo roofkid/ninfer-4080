@@ -871,12 +871,13 @@ make_sequence_planner_impl(DeviceContext& device, const EngineOptions& options,
         .max_concurrency     = options.max_concurrency,
         .prefill_chunk       = std::min(options.prefill_chunk, options.max_context),
         .draft_window        = options.speculative.draft_tokens,
-        // The wide n-gram verify window is disabled until the column-level corruption recorded
-        // in the plan's Stage 5c.3 note is explained, so the MTP verify window stays at the
-        // MTP depth and the wide graph family and record planes are not materialized. Restoring
-        // `ngram.max_drafts` here is the only change needed once that is fixed.
+        // With n-gram chaining the round verifies the wider window V when a row's pool extension
+        // reaches the margin, so the planner materializes the wide graph family and record planes;
+        // without it the MTP verify window stays at the MTP depth K.
         .verify_window       = options.speculative.backend == SpeculativeBackend::Mtp
-                                   ? options.speculative.draft_tokens
+                                   ? (options.speculative.ngram.mode != NgramDraftMode::Off
+                                          ? options.speculative.ngram.max_drafts
+                                          : options.speculative.draft_tokens)
                                    : 0U,
         .turn_checkpoint_ring = options.turn_checkpoint_ring,
         .speculative_backend = options.speculative.backend,

@@ -175,9 +175,8 @@ of llama.cpp `ngram-mod`: a shared pool maps the hash of the last `--ngram-n` to
 the token that last followed them, and the proposal continues from it for up to `--ngram-max`
 drafts in total (default 15, range `draft-tokens + 3 .. 15`). Extensions shorter than
 `--ngram-min` (default 1) are dropped; `--ngram-pool-mib` (default 16) sizes the pool. The engine
-currently verifies at most the MTP width `draft-tokens`, so a longer pool extension is clipped
-at verify time; the wider n-gram verify window is disabled pending a fix (the maintainer plan
-records the exact failure). Greedy verification keeps the output of the non-speculative
+verifies the full window V when some row's extension reaches `draft-tokens + 3`, and the MTP width
+`draft-tokens` otherwise, so prose keeps the MTP-only cost. Greedy verification keeps the output of
 route up to floating-point ties. The summary reports the pool's drafted and accepted tokens and
 the wide rounds:
 

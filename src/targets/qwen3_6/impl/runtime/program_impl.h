@@ -12083,10 +12083,8 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
         usable_drafts[row] = std::min({static_cast<std::uint32_t>(count), max_by_budget,
                                        capacity - sequence.execution_frontier - 1});
     }
-    // The wide (n-gram) verify window is disabled: the planner keeps `verify_window == draft_window`
-    // until the column-level corruption recorded in the plan's Stage 5c.3 note is explained, so a
-    // round verifies at most the MTP width K and longer extensions are clipped at verify time.
-    // `ngram_round_verify_drafts` stays the single policy decision once the window is restored.
+    // The planner materializes the wide n-gram window V, so a round widens to V when some row's
+    // usable draft reaches the margin and otherwise stays at the MTP width K.
     const std::uint32_t round_drafts =
         ngram_pool ? ngram_round_verify_drafts(
                          std::span<const std::uint32_t>(usable_drafts.data(), lanes.size()),

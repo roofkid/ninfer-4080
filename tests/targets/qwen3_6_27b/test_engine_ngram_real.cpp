@@ -10,9 +10,9 @@
 //       with quantized KV the divergences are reported only;
 //   (b) divergences per 1000 compared tokens are reported for both configurations;
 //   (c) the same configuration in two fresh Engines produces identical token ids (blocking).
-// The engine currently verifies at most the MTP width K (the wider n-gram verify window is
-// disabled pending the root cause recorded in the plan's Stage 5c.3 note), so this run cannot
-// yet require wide rounds; it protects the lossless criterion of the enabled path.
+// The engine materializes the wide n-gram verify window V and widens a round when a row's pool
+// extension reaches the margin, so the run requires at least one wide round: a regression that
+// clips rounds back to the MTP width fails here as well as the lossless criterion below.
 //
 // Environment: NINFER_TEST_ARTIFACT (required), NINFER_NGRAM_DRAFT_TOKENS (MTP depth, default 3),
 // NINFER_NGRAM_KV_DTYPE (bf16|int8|fp8|rk4v4-e8, default bf16), NINFER_NGRAM_MAX_NEW (default 384).
@@ -199,15 +199,16 @@ int main() {
         std::cerr << "FAIL: the n-gram configuration is not deterministic across two runs\n";
         ++failures;
     }
-    // Wide verify windows are disabled in the engine (see the plan's Stage 5c.3 note), so the pool
-    // cannot extend a round past the MTP width yet. The criterion here is the lossless one:
-    // enabling the chain must not change greedy output, and any divergence from the
-    // non-speculative route must be a scoring tie.
+    // The chain must reach the wide window on structured prompts and must not change greedy output:
+    // any divergence from the non-speculative route must be a scoring tie (blocking on bf16 KV).
     if (ngram_first.rounds == 0) {
         std::cerr << "FAIL: the speculative rounds did not run\n";
         ++failures;
     }
-
+    if (ngram_first.wide_rounds == 0) {
+        std::cerr << "FAIL: no n-gram round reached the wide verify window\n";
+        ++failures;
+    }
 
     ninfer::EngineOptions scoring_options;
     scoring_options.artifact_path = artifact;
