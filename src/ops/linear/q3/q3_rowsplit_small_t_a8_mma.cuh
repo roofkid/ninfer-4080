@@ -16,15 +16,17 @@
 //
 // Structure. One CTA owns 32 weight rows and one 8-column token tile (9..16 columns run two
 // tiles, token tile fastest in the grid). A stage is 512 codes: four 128-code weight groups and
-// eight 64-code activation groups, so every warp's A fragment comes from the one 64-byte step of
-// the decoded tile its group owns. The whole stage's codes, weight scales, quantized activation
-// and activation scales are copied with cp.async into a three-buffer ring, each step decodes two
-// 12-byte quarters per thread into an int8 tile with the same 64-byte-row swizzle the tall A8
-// engine uses, and the eight warps read their A and B fragments with the same ldmatrix patterns.
+// eight 64-code activation groups, one per warp. The whole stage's codes, weight scales,
+// quantized activation and activation scales are copied with cp.async into a three-buffer ring.
 //
-// The decoded tile is half the A16 route's bf16 tile, which is what lets a stage hold four
-// 128-code weight groups at the same shared-memory footprint as two, halving the stage count and
-// doubling the per-row cp.async burst (192 bytes against 96).
+// The A fragment is spread straight from the staged codes: each lane extracts the four 12-bit
+// fields its m16n8k32 A registers need (rows gid/gid+8 plus 16*mt, codes 32*ks + 16*(k&1) + 4*lid
+// of its warp's 64-code step) and runs the same `spread4` sign-extension the tall A8 engine uses.
+// There is no decoded int8 tile, so the decode -> ldmatrix -> barrier round trip disappears: each
+// warp reads only the staged codes and its own `x` fragments, and the end-of-loop barrier is the
+// stage's only block-wide synchronization. The stage ring holds four 128-code weight groups for
+// the shared-memory footprint the A16 route needs for two, halving the stage count and doubling
+// the per-row cp.async burst (192 bytes against 96).
 
 #include "ops/common/memory.cuh"
 #include "ops/common/mma.cuh"
@@ -81,15 +83,12 @@ struct Stage {
     __align__(16) float xscale[kActGroupsPerStage][StageTokens];
 };
 
-// The decoded weight tile is only live between the decode and the MMAs of one stage; the same
-// storage holds the K-split partial sums afterwards.
+// The stage ring is the only working storage: A fragments are spread straight from the staged
+// codes, so no decoded tile exists. The union holds the K-split partial sums after the loop.
 template <int StageTokens>
 struct Storage {
     union {
-        struct {
-            Stage<StageTokens> stage[kCodeBuffers];
-            __align__(16) std::int8_t decoded[kRows][kStageK];
-        } work;
+        Stage<StageTokens> work[kCodeBuffers];
         __align__(16) float partial[kWarps][kM16Tiles][32][4];
     };
 };
@@ -98,8 +97,7 @@ template <int StageTokens>
 constexpr int stage_bytes() {
     return kCodeBuffers * (kRows * kStageCodeBytes + StageTokens * kStageK +
                            kRows * kWeightGroupsPerStage * 2 +
-                           StageTokens * kActGroupsPerStage * 4) +
-           kRows * kStageK;
+                           StageTokens * kActGroupsPerStage * 4);
 }
 static_assert(stage_bytes<4>() * 2 + 2 * 1024 <= 102400, "two CTAs must fit four activation rows");
 static_assert(stage_bytes<8>() * 2 + 2 * 1024 <= 102400, "two CTAs must fit eight activation rows");
@@ -107,6 +105,15 @@ static_assert(stage_bytes<8>() * 2 + 2 * 1024 <= 102400, "two CTAs must fit eigh
 // 16-byte chunk c of the 64-code step with swizzle line `line` sits at chunk c ^ ((line >> 1) & 3).
 __device__ __forceinline__ unsigned swizzled_chunk(unsigned chunk, int line) {
     return (chunk ^ (static_cast<unsigned>(line >> 1) & 3u)) << 4;
+}
+
+// One 12-bit field (four codes) at `bit` of a packed 24-byte 64-code step. The field always spans
+// exactly two bytes, so two byte loads replace an unaligned 32-bit one.
+__device__ __forceinline__ unsigned field12(const std::uint8_t* base, int bit) {
+    const int byte = bit >> 3;
+    const unsigned raw =
+        static_cast<unsigned>(base[byte]) | (static_cast<unsigned>(base[byte + 1]) << 8);
+    return (raw >> (bit & 7)) & 0xfffu;
 }
 
 template <class Problem, int StageTokens = 4>
@@ -133,7 +140,7 @@ __global__ void __launch_bounds__(kThreads, 2)
     // 32 16-byte chunks per token and eight FP32 group scales per token.
     const auto issue_stage = [&](int stage, int buffer) {
         constexpr int kChunksPerRow = kStageCodeBytes / 16;
-        Stage<StageTokens>& target  = storage.work.stage[buffer];
+        Stage<StageTokens>& target  = storage.work[buffer];
         for (int item = tid; item < kRows * kChunksPerRow; item += kThreads) {
             const int row   = item / kChunksPerRow;
             const int chunk = item % kChunksPerRow;
@@ -173,41 +180,6 @@ __global__ void __launch_bounds__(kThreads, 2)
         }
         cp_commit();
     };
-
-    // Two decode quarters (32 codes each) per thread per stage: one 12-byte window becomes two
-    // 16-byte int8 vectors in the step the codes belong to.
-    const auto decode = [&](int buffer) {
-        const Stage<StageTokens>& source = storage.work.stage[buffer];
-#pragma unroll
-        for (int pass = 0; pass < 2; ++pass) {
-            const int item = tid + pass * kThreads;
-            const int row  = item >> 4;
-            const int gq   = item & 15;
-            const int gw   = gq >> 2;
-            const int q    = gq & 3;
-            const std::uint8_t* src = &source.codes[row][gw * Q3RowSplitStorage::kCodeBytesPerGroup +
-                                                         q * 12];
-            const std::uint32_t raw0 = *reinterpret_cast<const std::uint32_t*>(src);
-            const std::uint32_t raw1 = *reinterpret_cast<const std::uint32_t*>(src + 4);
-            const std::uint32_t raw2 = *reinterpret_cast<const std::uint32_t*>(src + 8);
-            unsigned out[8];
-#pragma unroll
-            for (int j = 0; j < 4; ++j) {
-                const std::uint32_t window = q3_tall::q3_tall_window(raw0, raw1, raw2, j);
-                out[2 * j]                 = q3_a8::spread4(window & 0x0fffu);
-                out[2 * j + 1]             = q3_a8::spread4(window >> 12);
-            }
-            const int step    = 2 * gw + (q >> 1);
-            const int line    = row * kStepsPerStage + step;
-            const unsigned ch = static_cast<unsigned>((q & 1) * 2);
-            std::int8_t* row_base = &storage.work.decoded[row][step * kStepK];
-            *reinterpret_cast<uint4*>(row_base + swizzled_chunk(ch, line)) =
-                make_uint4(out[0], out[1], out[2], out[3]);
-            *reinterpret_cast<uint4*>(row_base + swizzled_chunk(ch + 1, line)) =
-                make_uint4(out[4], out[5], out[6], out[7]);
-        }
-    };
-
     float acc[kM16Tiles][4] = {};
 
     // Prologue: two stages fill the ring, so the loop always has the next stage complete and the
@@ -223,12 +195,15 @@ __global__ void __launch_bounds__(kThreads, 2)
     cp_wait<0>();
     __syncthreads();
 
+    // The warp's 64-code weight step of every stage lives at this byte offset of its 192-byte code
+    // row; the A fragment fields are addressed relative to it.
+    const int step_byte =
+        (warp >> 1) * Q3RowSplitStorage::kCodeBytesPerGroup + (warp & 1) * 24;
     for (std::int32_t stage = 0; stage < stages; ++stage) {
         const int buffer = static_cast<int>(stage % kCodeBuffers);
-        decode(buffer);
-        // The decoded tile is visible to every warp, and the buffer this stage just read can be
-        // refilled by the copies of stage + kCodeBuffers.
-        __syncthreads();
+        // A fragments are spread straight from this stage's codes, and the buffer being refilled
+        // (stage - 1 mod kCodeBuffers) was fully read in the previous iteration, so the
+        // end-of-loop barrier is the only block-wide synchronization the stage needs.
         if (stage + kCodeBuffers - 1 < stages) {
             issue_stage(static_cast<int>(stage) + kCodeBuffers - 1,
                         static_cast<int>((stage + kCodeBuffers - 1) % kCodeBuffers));
@@ -236,7 +211,7 @@ __global__ void __launch_bounds__(kThreads, 2)
             cp_commit();
         }
 
-        const Stage<StageTokens>& source = storage.work.stage[buffer];
+        const Stage<StageTokens>& source = storage.work[buffer];
         int g[kM16Tiles][4];
 #pragma unroll
         for (int ks = 0; ks < 2; ++ks) {
@@ -251,14 +226,15 @@ __global__ void __launch_bounds__(kThreads, 2)
             }
 #pragma unroll
             for (int mt = 0; mt < kM16Tiles; ++mt) {
-                const int a_row   = (lane & 7) + ((lane >> 3) & 1) * 8;
-                const int line    = a_row * kStepsPerStage + warp;
-                const unsigned off =
-                    static_cast<unsigned>(line * kStepK) +
-                    swizzled_chunk(static_cast<unsigned>(2 * ks + ((lane >> 4) & 1)), line) +
-                    static_cast<unsigned>(mt) * 16 * kStageK;
-                unsigned a0, a1, a2, a3;
-                ldmatrix_x4(a0, a1, a2, a3, smem_addr(&storage.work.decoded[0][0]) + off);
+                const int row0            = gid + mt * 16;
+                const std::uint8_t* base0 = &source.codes[row0][step_byte];
+                const std::uint8_t* base1 = &source.codes[row0 + 8][step_byte];
+                const int bit_lo          = 96 * ks + 12 * lid;
+                const int bit_hi          = bit_lo + 48;
+                const unsigned a0         = q3_a8::spread4(field12(base0, bit_lo));
+                const unsigned a2         = q3_a8::spread4(field12(base0, bit_hi));
+                const unsigned a1         = q3_a8::spread4(field12(base1, bit_lo));
+                const unsigned a3         = q3_a8::spread4(field12(base1, bit_hi));
                 if (ks == 0) {
                     mma_s8_from(g[mt][0], g[mt][1], g[mt][2], g[mt][3], a0, a1, a2, a3, b0, b1,
                                 kFloatMagic, kFloatMagic, kFloatMagic, kFloatMagic);
