@@ -3,9 +3,8 @@
 # NInfer on the RTX 4080 with the DFlash2 draft model, Windows/Linux host through
 # Docker Desktop or Docker.
 #
-# Builds the product image from ./Dockerfile (first run, or when the checkout
-# revision changed since the image was built) and serves the DFlash2 profile at
-# the context that fits the 16 GiB card with the requantized Q4 companion:
+# Pulls the published image and serves the DFlash2 profile at the context that fits the 16 GiB
+# card with the requantized Q4 companion:
 #
 #   * 100,000-token context without vision, 65,536 with vision (measured caps; override
 #     with NINFER_CONTEXT)
@@ -19,37 +18,49 @@
 #     presence/frequency penalties 0. This engine has no multiplicative repeat penalty;
 #     the neutral value 1 is its implicit behavior.
 #
-# Measured on this card with the session-16 build (docs/maintainer/rtx-4080-plan.md
+# Measured on this card with the session-26 build (docs/maintainer/rtx-4080-plan.md
 # section 11; tiled corpus, rk4v4-e8, --prefill-chunk 1024, one repetition per point):
-# DFlash2 K=7 decodes about 136/232/205 tok/s at 8K/28K/56K depth against MTP3's
-# 130/126/109 (session-10: 124/205/183 against 125/118/103), is greedy-lossless
-# against ordinary decoding, and needs a smaller context because the companion
-# weights and ring state cost about 0.8 GiB more than MTP. On the code scenario
-# (examples/cli/messages/scenario_code_python.json) the A8 decode profile lifts
-# greedy decode from 104.9 to 118.2 tok/s against K=15's 67.1. MTP stays the
-# 100K profile (scripts/run-ninfer-4080.sh) because it is smaller; DFlash2 is
-# deeper-context speed option.
+# DFlash2 K=7 decodes about 167/262/239/213 tok/s at 8K/32K/64K/98K depth against
+# MTP3's 151/142/131/122, is greedy-lossless against ordinary decoding, and needs a
+# smaller context than MTP because the companion weights and ring state cost about
+# 0.8 GiB more. MTP stays the 100K profile (scripts/run-ninfer-4080.sh); DFlash2 is
+# the deeper-context speed option.
 #
-# The image carries only the binaries; the artifact is bind-mounted read-only. Every
-# build stamps the image with the checkout revision (label org.ninfer.revision), so
-# pulling source changes and re-running this launcher rebuilds the image instead of
-# serving the previous build.
+# The image carries only the binaries; the artifact is bind-mounted read-only. Download the
+# artifact first with scripts/download-qwen38-gsq3.sh (or .bat); the launcher looks for it in
+# <repo>/out and then <repo>/models.
 #
-# Environment overrides: NINFER_IMAGE (default ninfer-4080:gsq3),
-# NINFER_ARTIFACT (default <repo>/out/qwen3_8_27b_gsq3.ninfer),
+# Image resolution: an existing local image is used as-is. A missing image is pulled from the
+# registry; if the pull fails and this checkout has a Dockerfile, the image is built from source.
+# NINFER_BUILD=1 always builds from source. A locally built image carries the checkout revision
+# (label org.ninfer.revision), so pulling source changes and re-running this launcher rebuilds
+# that image instead of serving the previous build; published images have no label and are
+# served as pulled.
+#
+# Environment overrides: NINFER_IMAGE (default roofkid/ninfer-4080:gsq3),
+# NINFER_ARTIFACT (default <repo>/out or <repo>/models qwen3_8_27b_gsq3.ninfer),
 # NINFER_PORT (default 8080), NINFER_BIND (default 0.0.0.0, set 127.0.0.1 to keep the
 # port host-local), NINFER_VISION (1 enables media and selects the vision cap),
-# NINFER_CONTEXT (explicit token cap overrides both), NINFER_API_KEY (optional).
+# NINFER_CONTEXT (explicit token cap overrides both), NINFER_API_KEY (optional),
+# NINFER_BUILD=1 (force a source build).
 # NINFER_KV_DTYPE (default rk4v4-e8; int8 or rk8v4 trade context for MBPP-class accuracy).
 set -euo pipefail
 kv_dtype="${NINFER_KV_DTYPE:-rk4v4-e8}"
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-image="${NINFER_IMAGE:-ninfer-4080:gsq3}"
-artifact="${NINFER_ARTIFACT:-$root/out/qwen3_8_27b_gsq3.ninfer}"
+image="${NINFER_IMAGE:-roofkid/ninfer-4080:gsq3}"
+artifact="${NINFER_ARTIFACT:-}"
 host_port="${NINFER_PORT:-8080}"
 bind_address="${NINFER_BIND:-0.0.0.0}"
 vision="${NINFER_VISION:-0}"
+
+if [[ -z "$artifact" ]]; then
+    if [[ -f "$root/out/qwen3_8_27b_gsq3.ninfer" ]]; then
+        artifact="$root/out/qwen3_8_27b_gsq3.ninfer"
+    else
+        artifact="$root/models/qwen3_8_27b_gsq3.ninfer"
+    fi
+fi
 
 command -v docker >/dev/null 2>&1 || {
     echo "docker was not found on PATH. Install Docker Desktop or docker." >&2
@@ -57,7 +68,8 @@ command -v docker >/dev/null 2>&1 || {
 }
 if [[ ! -f "$artifact" ]]; then
     echo "Missing $artifact" >&2
-    echo "Convert the 3-bit GSQ artifact with its DFlash2 companion first (docs/maintainer/rtx-4080-plan.md)." >&2
+    echo "Download it first with scripts/download-qwen38-gsq3.sh (or .bat), or point" >&2
+    echo "NINFER_ARTIFACT at an existing qwen3_8_27b_gsq3.ninfer copy." >&2
     exit 1
 fi
 artifact_dir="$(cd -- "$(dirname -- "$artifact")" && pwd)"
@@ -82,15 +94,24 @@ fi
 build_image=0
 build_reason=""
 if ! docker image inspect "$image" >/dev/null 2>&1; then
+    echo "Pulling $image..."
+    if ! docker pull "$image"; then
+        if [[ -f "$root/Dockerfile" ]]; then
+            build_image=1
+            build_reason="pull failed and a source checkout is present"
+        else
+            echo "Could not pull $image and no Dockerfile is available to build it." >&2
+            exit 1
+        fi
+    fi
+elif [[ "${NINFER_BUILD:-0}" != "0" ]]; then
     build_image=1
-    build_reason="first run"
-elif [[ -z "$source_revision" ]]; then
-    echo "Note: git is unavailable or $root is not a git repository; using the existing $image without a revision check." >&2
-else
+    build_reason="NINFER_BUILD is set"
+elif [[ -f "$root/Dockerfile" && -n "$source_revision" ]]; then
     image_revision="$(docker image inspect --format '{{ index .Config.Labels "org.ninfer.revision" }}' "$image" 2>/dev/null || true)"
-    if [[ "$image_revision" != "$source_revision" ]]; then
+    if [[ -n "$image_revision" && "$image_revision" != "$source_revision" ]]; then
         build_image=1
-        build_reason="checkout is at $source_revision, image was built from ${image_revision:-an unlabelled image}"
+        build_reason="locally built image is from $image_revision, checkout is at $source_revision"
     fi
 fi
 if (( build_image )); then

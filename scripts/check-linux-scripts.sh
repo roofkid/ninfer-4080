@@ -87,6 +87,13 @@ case "${1:-}" in
     printf '%s' "$label" > "$state/images/$(name "$tag")"
     printf 'build %s %s\n' "$tag" "$label" >> "$state/log"
     ;;
+  pull)
+    if [[ "${DOCKER_STUB_PULL_OK:-0}" == "1" ]]; then
+      : > "$state/images/$(name "$2")"
+      exit 0
+    fi
+    exit 1
+    ;;
   run)
     shift
     printf '%s\n' "$@" > "$state/run-args"
@@ -121,6 +128,14 @@ grep -Fx -- 'dflash2' "$tmp/docker-state/run-args" >/dev/null
 grep -Fx -- '7' "$tmp/docker-state/run-args" >/dev/null
 grep -Fx -- '--max-context' "$tmp/docker-state/run-args" >/dev/null
 
+# A published (unlabelled) image is served as-is; a successful pull needs no build.
+: > "$tmp/docker-state/images/ninfer-4080__gsq3"
+launch_4080 run-ninfer-4080.sh
+[[ "$(grep -c '^build ' "$tmp/docker-state/log")" == 2 ]]
+rm -f -- "$tmp/docker-state/images/ninfer-4080__gsq3"
+DOCKER_STUB_PULL_OK=1 PATH="$tmp/docker-bin:$PATH" DOCKER_STUB_DIR="$tmp/docker-state" \
+  NINFER_ARTIFACT="$tmp/4080/artifact.ninfer" "$root/run-ninfer-4080.sh" >/dev/null 2>&1
+[[ "$(grep -c '^build ' "$tmp/docker-state/log")" == 2 ]]
 # NINFER_KV_DTYPE selects the served KV mode; the default stays rk4v4-e8.
 PATH="$tmp/docker-bin:$PATH" DOCKER_STUB_DIR="$tmp/docker-state" \
   NINFER_ARTIFACT="$tmp/4080/artifact.ninfer" NINFER_KV_DTYPE=int8 \
