@@ -120,6 +120,15 @@ A/B on the 4080: append bench int8 -32..-35% at 8K-128K, engine `pp32768` 2314.1
 (+6.7%) and `pp100000 --prefill-chunk 2688` 1710.0 -> 1971.4 tok/s (+15.3%); §11 has the record and
 the unchanged real-route checks.
 
+**Session 27 (2026-10-03) prepared the Stage 6 publication.** Landed: the model card,
+manifest, and hash list under `model-cards/Qwen3.8-27B-GSQ3-NInfer/`; the `gsq3` contract as
+section 14 of `qwen3.8-27b-artifact.md`; `scripts/download-qwen38-gsq3.{sh,bat}`; the 4080-first
+README with the three-command quick start (download -> docker run -> serve); and pull-first
+launchers (`roofkid/ninfer-4080:gsq3`, source build as fallback) for both the MTP3 and DFlash2
+profiles. Published 2026-10-03: the Hugging Face repository `roofkid/Qwen3.8-27B-GSQ3-NInfer`
+(main `2359d374`) carries the artifact, and the Docker Hub image `roofkid/ninfer-4080:gsq3` is
+pushed; `ghcr.io` is deferred.
+
 Environment for this plan: the `Dockerfile.dev` image in this repository. It is the sandbox the
 maintainer hands to pi, with the host RTX 4080 passed through:
 
@@ -732,6 +741,13 @@ profile now fits 100,000 tokens text-only / 65,536 with vision at the same safet
 Held until Stage 5b passes (D10). Then: artifact reference + model card + README fork section +
 ledger rows; state the source revision, the verbatim claim and what it does and does not cover,
 the memory profiles that were validated, and the known prefill limitation on 76 SMs.
+
+**Landed 2026-10-03 (session 27).** `model-cards/Qwen3.8-27B-GSQ3-NInfer/` (HF card,
+manifest, licenses, `SHA256SUMS`), `qwen3.8-27b-artifact.md` section 14, the download scripts,
+the 4080 README quick start, the published-image launchers, and the port-ledger publication
+row. The Hugging Face model repository (`roofkid/Qwen3.8-27B-GSQ3-NInfer`, main `2359d374`) and
+the Docker Hub image (`roofkid/ninfer-4080:gsq3`, tag `0.6.1-rtx4080`) are live; `ghcr.io` is
+deferred. Remaining: the fork push of this commit.
 
 ## 7. Where each gate runs
 

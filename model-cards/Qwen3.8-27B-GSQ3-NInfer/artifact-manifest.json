@@ -1,0 +1,84 @@
+{
+  "schema": "ninfer.artifact-manifest",
+  "schema_version": 1,
+  "artifact": {
+    "filename": "qwen3_8_27b_gsq3.ninfer",
+    "bytes": 13330776576,
+    "sha256": "c6f27073393e5bcc629489420470d71f52a27553bfc5c360fef07a25b3b550d7",
+    "container_version": 2,
+    "model_id": "qwen3.8-27b",
+    "weights_id": "gsq3",
+    "target_key": "qwen3_8_27b"
+  },
+  "source": {
+    "base": {
+      "repo_id": "Qwen/Qwen3.8-27B",
+      "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+      "license": "Apache-2.0"
+    },
+    "quantized": {
+      "repo_id": "ISTA-DASLab/Qwen3.8-27B-3Bit-GSQ",
+      "revision": "b5ce0b76f60020a875dee4f6ec9d934cca4121e4",
+      "license": "Apache-2.0"
+    },
+    "dflash2": {
+      "repo_id": "z-lab/Qwen3.8-27B-DFlash2",
+      "revision": "50307d4c4cde6860d4eee73e2547cd786fe8e8a4",
+      "license": "Apache-2.0"
+    }
+  },
+  "conversion": {
+    "recipe_id": "qwen3_8_27b_gsq3-v1",
+    "converter_repository": "https://github.com/roofkid/ninfer-4080",
+    "converter_revision": "ce85711b5f71296c4027f839284e41acd9a80669",
+    "ranking_input": {
+      "path": "tools/freq_corpus/fixtures/ranking/ranking.train.counts.i64",
+      "sha256": "c692dc76388132c910547589b4fb4a0503fbd6ad50aaac6a509bbcb192a8afa5"
+    },
+    "scale_conversion": {
+      "words": 240271360,
+      "rounded": 218,
+      "max_abs_error": 2.9802322387695312e-08,
+      "note": "bf16 multipliers stored as binary16; every rounded word is binary16 subnormal and bounded by 2**-25"
+    }
+  },
+  "runtime": {
+    "repository": "https://github.com/roofkid/ninfer-4080",
+    "minimum_revision": "db4a7d9ee4c03adb26cf1958463b41c5a59db39b",
+    "cuda_architecture": "sm_89",
+    "dflash2_draft_tokens": {
+      "recommended": 7,
+      "minimum": 1,
+      "maximum": 15
+    }
+  },
+  "inventory": {
+    "objects": 1190,
+    "tensors": 1184,
+    "resources": 6,
+    "formats": {
+      "BF16": 627,
+      "FP32": 96,
+      "I32": 1,
+      "Q3G128_F16S": 320,
+      "Q4G64_F16S": 78,
+      "Q5G64_F16S": 54,
+      "Q6G64_F16S": 1,
+      "W8G32_F16S": 7
+    },
+    "layouts": {
+      "contiguous-le-v1": 724,
+      "row-split-k128-v1": 460
+    },
+    "encodings": {
+      "raw-bytes-v1": 6
+    },
+    "bytes": {
+      "tensor": 13317736864,
+      "resource": 12837177,
+      "object": 13330574041,
+      "payload_span": 13330588160,
+      "alignment": 14119
+    }
+  }
+}

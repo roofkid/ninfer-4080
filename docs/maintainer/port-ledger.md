@@ -116,6 +116,21 @@ deleted when the work finishes. Three items belong in this ledger:
   4.596095. Our own port of the fork's schedule to this tree's kernel, which predates the fork's
   pipeline.
 
+- **RTX 4080 publication (2026-10-03).** The fork `roofkid/ninfer-4080` (branch
+  `rtx4080-port`) is the publication home: the Hugging Face model repository
+  `roofkid/Qwen3.8-27B-GSQ3-NInfer` carries the 3-bit artifact
+  (`qwen3_8_27b_gsq3.ninfer`, 13,330,776,576 bytes, sha256
+  `c6f27073393e5bcc629489420470d71f52a27553bfc5c360fef07a25b3b550d7`), the model card, the
+  manifest, and the hash list; `roofkid/ninfer-4080:gsq3` (Docker Hub, tags `gsq3` and
+  `0.6.1-rtx4080`) is the binaries-only image. `scripts/download-qwen38-gsq3.{sh,bat}` fetch and
+  verify the
+  artifact, the 4080 launchers pull the published image with a local source build as the
+  fallback, and the README carries the three-command consumer quick start. The `gsq3`
+  storage contract is documented in `qwen3.8-27b-artifact.md` section 14. The artifact
+  sources are Apache-2.0 (GSQ checkpoint, base model, DFlash2), and the card states that
+  the verbatim claim covers the 323 packed objects from the GSQ checkpoint while the MTP,
+  Vision, and DFlash2 components are converter-quantized.
+
 ## Feature rows
 
 | Feature | 4090 (`rtx4090-port`) | 5090 (`nuntius-serve`) | Notes |

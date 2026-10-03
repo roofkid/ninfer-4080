@@ -1,9 +1,10 @@
 # Qwen3.8-27B artifact reference
 
-This reference defines both registered Qwen3.8-27B `.ninfer` storage contracts: identity, object
+This reference defines the registered Qwen3.8-27B `.ninfer` storage contracts: identity, object
 inventory, shapes, numeric formats, storage layouts, fused row order, aliases, fixed sources, and
 source-to-object transforms. Sections 1 through 12 define the `nvfp4` profile and the DFlash2
-suffix shared by both profiles; Section 13 defines the `groupwise-int` base allocation.
+suffix shared by all profiles; Section 13 defines the `groupwise-int` base allocation; Section 14
+defines the 3-bit `gsq3` allocation registered by the RTX 4080 fork.
 
 The NVFP4 profile is a registered Engine identity implemented by the target converter, exact
 binder, and Qwen3.8 execution leaves. The generic artifact registry resolves its version-2
@@ -913,3 +914,98 @@ python3 -m tools.convert.qwen3_8_27b.convert \
 The converter validates the official and DFlash2 checkpoints, frontend resources, complete object
 plan, and numeric recipes before opening the output, then writes the sibling
 `qwen3_8_27b.ninfer.conversion.json` report.
+
+## 14. `gsq3` 3-bit peer artifact
+
+The RTX 4080 fork registers a third peer identity that fits the 16 GB card:
+
+```text
+filename   = qwen3_8_27b_gsq3.ninfer
+model_id   = qwen3.8-27b
+weights_id = gsq3
+target_key = qwen3_8_27b
+recipe_id  = qwen3_8_27b_gsq3-v1
+```
+
+The artifact is a verbatim repack of the published 3-bit GSQ checkpoint. It contains 1,190
+objects (1,184 tensors and the six frontend resources), 13,330,776,576 bytes, container version 2.
+Its identity is registered only by this fork's `rtx4080-port` branch; upstream NInfer and the
+RTX 3090/4090 forks do not resolve `weights_id = gsq3` and reject the file.
+
+### 14.1 Fixed sources
+
+| Role | Repository | Revision | License |
+|---|---|---|---|
+| Text body (320 matrices) | `ISTA-DASLab/Qwen3.8-27B-3Bit-GSQ` | `b5ce0b76f60020a875dee4f6ec9d934cca4121e4` | Apache-2.0 |
+| MTP layer (15 BF16 tensors) | `Qwen/Qwen3.8-27B` | `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` | Apache-2.0 |
+| Vision tower (BF16, ignored by the GSQ quantization config) | `ISTA-DASLab/Qwen3.8-27B-3Bit-GSQ` | `b5ce0b76f60020a875dee4f6ec9d934cca4121e4` | Apache-2.0 |
+| DFlash2 companion | `z-lab/Qwen3.8-27B-DFlash2` | `50307d4c4cde6860d4eee73e2547cd786fe8e8a4` | Apache-2.0 |
+| Draft-head token ranking | `tools/freq_corpus/fixtures/ranking/ranking.train.counts.i64` | committed fixture | Apache-2.0 |
+
+The GSQ release carries no MTP or DFlash2 objects, so the 15 `mtp/*` BF16 tensors come from the
+official checkpoint and the DFlash2 companion comes from the `z-lab` source through the existing
+`W8G32`-then-`Q4G64` recipe. The Vision tower is read as BF16 from the GSQ release (its config
+ignores `.*visual.*`) and quantized by the shared official recipe. The draft-head token id list is
+derived from the committed frequency fixture plus the tokenizer, as for the other profiles.
+
+### 14.2 Storage and numeric assignment
+
+`Q3G128_F16S` is the registered 3-bit scheme: symmetric codes in `[-4, 3]`, one FP16 multiplier per
+128-value K group, reconstruction `value = code * scale`, 3.125 bits per weight. All 320 Text
+matrices use it with the `row-split-k128-v1` plane (48 bytes per 128-code group, dense
+little-endian 3-bit fields). The remaining allocation follows the registered formats:
+
+| Format | Tensors | Role |
+|---|---:|---|
+| `Q3G128_F16S` | 320 | Text attention/GDN/MLP matrices |
+| `Q4G64_F16S` | 78 | token embedding, output head, draft head, Vision qkv/mlp-fc1, DFlash2 companion |
+| `Q5G64_F16S` | 54 | Vision attention output and mlp-fc2 |
+| `Q6G64_F16S` | 1 | Vision patch embedding |
+| `W8G32_F16S` | 7 | MTP matrices and the Vision merger |
+| `BF16` | 627 | norms, scalars, frontend, unquantized Vision |
+| `FP32` | 96 | GDN/convolution state constants |
+| `I32` | 1 | drift/token index |
+
+Row fusion uses the same logical row order and gathers as Section 3: query/key, gate/value,
+value/z, and gate/up are concatenations of the source `(codes, scale)` row pairs; no represented
+value changes during the fusion.
+
+**Verbatim scope.** The 323 packed objects that come from the publisher's checkpoint — the 320
+Text matrices plus `text/token_embedding`, `text/output_head`, and `text/draft_head` (a row gather
+of the output-head plane) — are copied exactly: every code and every group scale, at both the 3-bit
+and the 4-bit vocabulary widths, with only the publisher's unsigned `code + 2^(bits-1)` bit-plane
+layout inverted into two's-complement fields. The one value deviation is 218 of 240,271,360 bf16
+scales that are not binary16-exact: all are subnormal, rounded with an error bounded by `2**-25`
+(max `2.98e-8`), and the converter fails above that bound. The publisher's task evaluations
+therefore describe the represented Text and vocabulary weights. The claim does not extend to the
+MTP, Vision, or DFlash2 objects, which the converter quantizes from their BF16 sources.
+
+### 14.3 Conversion and verification
+
+```bash
+python3 -m tools.convert.qwen3_8_27b.convert_gsq3 \
+  --gsq-model /path/to/Qwen3.8-27B-3Bit-GSQ \
+  --official-model /path/to/Qwen3.8-27B \
+  --dflash2-model /path/to/Qwen3.8-27B-DFlash2 \
+  --out out/qwen3_8_27b_gsq3.ninfer \
+  --device cuda
+```
+
+The canonical in-tree verifier is `tools/convert/qwen3_8_27b/verify_gsq3.py`; it rebuilds every
+packed plane from an independent decode of the source shards and compares words. On the published
+artifact it reports 323 packed objects, 4,527,104 rows, 240,271,360 groups, base bytes equal
+323/323, scales equal 323/323, and the 218 rounded subnormals above. The writer emits the sibling
+`qwen3_8_27b_gsq3.ninfer.conversion.json` report with the source revisions and the scale audit.
+
+### 14.4 Runtime profile and fit
+
+`WeightsProfile::Qwen38Gsq3` binds the identity, with the exact Q3 outputs, Q4 vocabulary
+endpoints, and the profile-aware workspace capacities. On the RTX 4080 the validated profiles are:
+
+- 102,400 tokens with Vision and MTP3 at `rk4v4-e8` (`--host-kv-mib 4096`): about 11.2 GiB of
+  device weights and roughly 0.9 GiB free after startup; the launcher serves this profile.
+- DFlash2 K=7 at 100,000 tokens text-only and 65,536 tokens with Vision at the same safety margin.
+- `int8` and `rk8v4` KV trade context for accuracy and fit below 100K.
+
+The artifact model card, with the measured depth table and the consumer quick start, lives in
+`model-cards/Qwen3.8-27B-GSQ3-NInfer/`.
