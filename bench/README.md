@@ -519,7 +519,7 @@ counts, or kernel-name filters in these benchmarks.
 
 `ninfer_causal_softmax_attention_bench` measures the two public causal-cache entries:
 append-and-attend and cached-only. It covers the registered D256 H24/KV4 and H16/KV2 geometries
-with BF16, INT8-G64, FP8-E4M3FN-row256, NVFP4-G16, and K8V4 KV storage. Production dispatch
+with BF16, INT8-G64, FP8-E4M3FN-row256, NVFP4-G16, K8V4, and RK4V4-E8 KV storage. Production
 receives the caller-visible execution envelope and owns all decode, prompt, Small-T, and split-KV
 choices. `all` emits every storage mode as an independent row.
 
