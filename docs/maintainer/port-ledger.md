@@ -100,6 +100,21 @@ deleted when the work finishes. Three items belong in this ledger:
   padded-K keep A16 and 129+ keeps the tall engine. Op bench `34816x5120` T=2..16 -15..-17% against
   A16; greedy engine MTP3 +10%, DFlash2 K=7 +13%, K=15 +11%, with the K=7/K=15 texts unchanged.
   Also our own extension of the shared 5c.2 A8 contract, not a fork port.
+- **5c.4 prompt attention worker V-dequant (2026-10-03, session 26).** Ported from
+  `JGamboa/ninfer-4090-windows` `7b6ed55` ("move V dequant to the workers in the int8 prompt
+  kernel"): the producers now own only QK/softmax/K (P kept in registers) and the workers own
+  the FP32 output accumulator, PV and V (issue, dequant). The two per-tile block barriers are
+  replaced by one-sided named barriers (`PFree`/`PReady`), so the producer score pass overlaps
+  the previous tile's PV and the workers dequantize V(t+1) after PV(t) off the producers'
+  scoring path; packed K codes land in the upper half of each packed V row and each producer
+  expands the chunks it issued. The shared `kv_cache_unpack_i4x16` is bytewise now (xor, add,
+  xor, byte permutes). `ninfer_causal_softmax_attention_bench` gained `--kv-dtype rk4v4-e8`.
+  On the 4080 the append bench (d256-h24-kv4, B=1, W=1024, int8) drops 32-35% at 8K-128K
+  (e.g. 128K 38.16 -> 24.67 ms) and the engine same-session A/B is `pp32768` 2314.1 -> 2470.0
+  tok/s and `pp100000 --prefill-chunk 2688` 1710.0 -> 1971.4 tok/s. Full `ctest` 133/120/13/0
+  after this port (the new `rk4v4-e8` bench mode adds no test) and quick perplexity stays
+  4.596095. Our own port of the fork's schedule to this tree's kernel, which predates the fork's
+  pipeline.
 
 ## Feature rows
 

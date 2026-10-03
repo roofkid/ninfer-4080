@@ -112,6 +112,14 @@ gains 15-27% and the same-build DFlash2 K=7 CLI decode is 121.4 -> 136.1 tok/s (
 probe split, the new `ninfer_linear_bench --flush read` option, and the nsys numbers. The remaining
 decode item from session 21 is the native T=9..16 single-pass tile for K=15.
 
+**Session 26 (2026-10-03) landed 5c.4, the prompt attention worker V-dequant port** — the
+session-13 audit's ranked candidate 5 and the last untouched prefill kernel. The fork's pipelined
+producer/worker schedule (P in registers, workers own PV and V, one-sided `PFree`/`PReady` barriers)
+plus the bytewise `kv_cache_unpack_i4x16` are in; the op bench gains `--kv-dtype rk4v4-e8`. Same-session
+A/B on the 4080: append bench int8 -32..-35% at 8K-128K, engine `pp32768` 2314.1 -> 2470.0 tok/s
+(+6.7%) and `pp100000 --prefill-chunk 2688` 1710.0 -> 1971.4 tok/s (+15.3%); §11 has the record and
+the unchanged real-route checks.
+
 Environment for this plan: the `Dockerfile.dev` image in this repository. It is the sandbox the
 maintainer hands to pi, with the host RTX 4080 passed through:
 
@@ -632,17 +640,21 @@ The session-7 engine planned `verify_window == draft_window`, so the wide graph 
 planes were not materialized and a round verified at most the MTP width; session 19 restored
 `verify_window = ngram.max_drafts` and the real test requires a wide round.
 
-**5c.4 Prompt attention worker V-dequant (last, modest).**
+**5c.4 Prompt attention worker V-dequant (DONE 2026-10-03, session 26; evidence below).**
 
-- Fork `7b6ed55` against a 788-line file; ours is 642 lines at the same path
-  (`src/ops/softmax_attention/dense/causal_cache/prompt_i8.cuh`), so port the ideas, not the
-  patch: workers dequantize V(t+1) to FP16 after PV(t) behind a worker-only barrier; replace
-  the two per-tile block barriers with one-sided named barriers (`PFree`/`PReady`); bytewise
-  INT4 -> INT8 unpack. Their result is -15..-25% on the kernel; in our `pp32768` profile prompt
-  attention is 7.8% of prefill (more at 100K), so expect low single digits overall plus some
-  depth-decode help.
-- Acceptance: `ninfer_softmax_attention_test` (full and `--rk4v4-e8-only`) passes; the append
-  bench improves at 8K-128K; engine prefill recorded.
+- Fork `7b6ed55` ("move V dequant to the workers in the int8 prompt kernel"). Ours predated the
+  fork's producer/worker pipeline, so this landed the whole schedule, not only the delta:
+  producers keep P in registers and own QK/softmax/K; workers own the FP32 output accumulator,
+  PV and V (issue + dequant); `PFree`/`PReady` one-sided named barriers replace the two per-tile
+  block barriers; V(t+1) is dequantized by the workers right after PV(t), off the producers'
+  scoring path; packed K codes land in the upper half of each packed V row and each producer
+  expands the chunks it issued. The shared `kv_cache_unpack_i4x16` is bytewise (xor, add, xor,
+  byte permutes). `ninfer_causal_softmax_attention_bench` gained `--kv-dtype rk4v4-e8` so the
+  production KV mode is measurable.
+- Acceptance met: `ninfer_softmax_attention_test` full and `--rk4v4-e8-only` pass; the append
+  bench improves 32-35% at 8K-128K (int8; rk4v4-e8 measured after); engine prefill recorded
+  (same-session A/B). Full `ctest` 133/120/13/0; the n-gram and DFlash2 real routes reproduce
+  their recorded outputs.
 
 **Order and dependencies.** 5c.1 -> 5c.2 (A8 reuses 5c.1's skeleton). 5c.3 is engine-side and
 independent; it can run in parallel with either kernel port. 5c.4 last. Each port lands with
@@ -796,7 +808,11 @@ DFlash2 on the 4080; multi-lane and preemption; the 5090 tree; Windows.
    defect, landed the RK4V4E8 oracle coverage + the rotated-V double-rounding fix, and left the
    wide-window re-enable (landed in session 19) and DFlash2 K=5 as maintainer calls. The landed work
    through session 25 is committed on `rtx4080-port`; new work stays uncommitted until the
-   maintainer asks for a commit.
+   maintainer asks for a commit. Session 26 (§11) then landed 5c.4, the last untouched prefill
+   kernel: the prompt attention worker V-dequant schedule takes the append bench 32-35% down at
+   8K-128K and the engine same-session A/B to `pp32768` 2470 and `pp100000` 1971 tok/s, with the
+   real n-gram/DFlash2 routes unchanged. No prefill item from the session-13 audit remains; the
+   open decode item is the native T=9..16 single-pass tile (session 21 item c).
 
 ## 11. Stage log
 
@@ -1620,10 +1636,12 @@ the 96 B whole-group stages that already reach ~450 GB/s in the small-T decode k
 3. Decode: ~~finish the 5c.3 corruption root cause~~ **DONE (session 15): the flips are
    trajectory sensitivity, not a defect — see the session-15 section at the end of §11.** The
    n-gram wide window was a maintainer call and is re-enabled in session 19; DFlash2 K=5 stays open.
-4. Prefill: restage the A8 tall code path with whole-group cp.async (48-192 B per row) instead of
-   the 24 B register loads; a 2x kernel gain would take pp100000 from 1675 to ~2300 tok/s.
-5. Prefill: prompt attention (42% of 100K) runs at ~17-20% of tensor peak with the 5c.4 port still
-   unlanded; it is the largest untouched prefill kernel.
+4. ~~Prefill: restage the A8 tall code path with whole-group cp.async (48-192 B per row) instead of
+   the 24 B register loads.~~ **Withdrawn (session 20): the staging structure is not the wall.**
+5. ~~Prefill: prompt attention (42% of 100K); the 5c.4 port is unlanded.~~ **DONE (session 26,
+   2026-10-03): the 5c.4 worker V-dequant schedule landed; append bench int8 -32..-35% at
+   8K-128K, `pp100000 --prefill-chunk 2688` 1710 -> 1971 tok/s and `pp32768` 2314 -> 2470 tok/s
+   (same-session A/B). §11 has the record. This was the last untouched prefill kernel.**
 6. Optional: the documented tail-aware split for the 129-513-column A8 widths (last tile is
    nearly empty) and the GDN chunked ops (~4% at 100K).
 
@@ -2424,3 +2442,64 @@ Session-21 item (b) is closed. Item (c) remains: the direct-A route does not rem
 cost at T=9..16 (203.8 us against 118.8 at T=8), so DFlash2 K=15 and wide n-gram windows still want
 the native single-pass 16-column tile. Bench tooling now takes `--flush read|memset`; use
 `--flush read` for streaming claims.
+
+### Prompt attention worker V-dequant: 5c.4 landed (2026-10-03, session 26)
+
+**Deliverable.** The session-13 audit's ranked candidate 5: `src/ops/softmax_attention/dense/
+causal_cache/prompt_i8.cuh` — 42% of the pp100000 kernel time and "the largest untouched prefill
+kernel". Accepted evidence is the op test, the append bench at 8K-128K, and the engine prefill.
+
+**Port.** The fork's `7b6ed55` schedule. Our kernel predated the fork's pipeline (all 16 warps did
+PV, P lived in shared memory, and every tile paid two full-CTA barriers), so the whole structure
+was adopted, not only the commit delta:
+
+- eight producer warps (four 16-row tiles x two Bc column halves) own QK, the online softmax, K
+  staging and packed-K expansion, and keep P(t+1) in registers;
+- eight worker warps (two 16-row tiles x one 64-dimension group) own the FP32 accumulator, PV,
+  and V issue + dequant;
+- `PFree`/`PReady` one-sided named barriers (`bar.arrive`/`bar.sync`, count 512) replace the two
+  per-tile `__syncthreads()`: producers score tile t+1 while workers PV tile t, and the workers
+  dequantize V(t+1) right after PV(t) behind a worker-only barrier, off the scoring path;
+- packed K codes (rk4v4, rk4v4-e8) land by cp.async in the upper half of each packed V row and
+  each producer expands the chunks it issued;
+- QK walks key tiles outermost (one 8-byte scale load and one x4 ldmatrix per group, groups still
+  summed in ascending order) and the shared `kv_cache_unpack_i4x16` is bytewise exact
+  (xor/add/xor/byte permutes) — both from the same commit;
+- `ninfer_causal_softmax_attention_bench` gained `--kv-dtype rk4v4-e8` so the production KV mode
+  is measurable (bench/README.md updated).
+
+**Op bench** (`ninfer_causal_softmax_attention_bench --entry append --geometry d256-h24-kv4
+--kv-dtype int8 --batch 1 --tokens 1024 --context ... --execution eager --cache cold --warmup 3
+--repeat 5`, two rounds; CSVs `profiles/bench/5c-4/{base,after}_int8_r*.csv`):
+
+| context | before | after r1 / r2 | delta |
+|---:|---:|---:|---:|
+| 8K | 2677.8 us | 1809.4 / 1805.0 | -32.4% |
+| 16K | 5096.4 us | 3416.1 / 3409.6 | -33.0% |
+| 32K | 9751.5 us | 6583.3 / 6583.9 | -32.5% |
+| 64K | 18830.3 us | 12682.2 / 12985.0 | -32.7% |
+| 128K | 38164.5 us | 24666.1 / 24792.4 | -35.4% |
+
+`rk4v4-e8` after (same command; CSVs `..._rk4v4-e8_r1/r2.csv`): 2123.0/2138.0, 4013.1/4009.0,
+7790.6/7835.0, 14825.5/14664.0, 29753.3/29603.0 us at the same five contexts.
+
+**Engine, same-session A/B** (stash the port, rebuild, measure, restore; `ninfer_bench`,
+`rk4v4-e8`, warmup 1, one repetition; logs `profiles/bench/5c-4/s26_pp32768.log` and
+`s26_pp100000.log`):
+
+- `pp32768`: **2314.07 -> 2469.95/2470.48 tok/s (+6.7%)** — against the plan's previously
+  recorded 2277.53, so the prompt-attention share explains the delta.
+- `pp100000 --prefill-chunk 2688`: **1709.99 -> 1971.36/1971.13/1968.17 tok/s (+15.3%)** — the
+  100K profile now clears the session-9 1675.39 record by 17.7%.
+
+**Numerics and behavior.** `ninfer_softmax_attention_test` passes full and `--rk4v4-e8-only`;
+full `ctest` 133 tests, 120 passed, 13 expected skips, 0 failed; `git diff --check` clean.
+`ninfer_qwen3_6_27b_ngram_real_test` (bf16) passes with exactly the session-19 counts — 80 wide
+rounds of 560, 958 drafted / 555 accepted, 0 n-gram-added divergences — and
+`ninfer_qwen3_8_27b_dflash2_real_test 7 1 1 1` reports `accepted=20/20`, so the prompt-kernel
+restructure leaves the recorded real-route outputs unchanged. `ninfer-perplexity --quick`
+(`--kv-dtype int8`) reports 4.596095 overall with the same per-domain numbers as the session-9
+anchor, so the weight-quality gate is untouched.
+
+**Residual.** No prefill item from the session-13 audit remains. The one open decode item is still
+session-21 item (c): the native T=9..16 single-pass tile for K=15 / wide n-gram windows.
