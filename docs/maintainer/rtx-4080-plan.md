@@ -105,6 +105,13 @@ PASS; the structured-JSONL CLI scenario drops 68 -> 58 decode rounds (129.1 -> 1
 byte-identical output. The `--no-cuda-graph` route still shows the session-13..17 trajectory-flip
 class; §11 has the record.
 
+**Session 25 (2026-10-03) cut the Q3 A8 small-T in-kernel consume** (session-21 item b): A fragments
+are now spread straight from the staged codes into the mma fragment layout, removing the decoded int8
+tile, its ldmatrix read and the decode barrier. The outputs are byte-identical; the clean-flush op
+gains 15-27% and the same-build DFlash2 K=7 CLI decode is 121.4 -> 136.1 tok/s (+12.1%). §11 has the
+probe split, the new `ninfer_linear_bench --flush read` option, and the nsys numbers. The remaining
+decode item from session 21 is the native T=9..16 single-pass tile for K=15.
+
 Environment for this plan: the `Dockerfile.dev` image in this repository. It is the sandbox the
 maintainer hands to pi, with the host RTX 4080 passed through:
 
@@ -788,7 +795,8 @@ DFlash2 on the 4080; multi-lane and preemption; the 5090 tree; Windows.
    Session 15 (§11) closed the wide-verify blocker as trajectory sensitivity rather than a kernel
    defect, landed the RK4V4E8 oracle coverage + the rotated-V double-rounding fix, and left the
    wide-window re-enable (landed in session 19) and DFlash2 K=5 as maintainer calls. The landed work
-   is uncommitted in the working tree until the maintainer asks for a commit.
+   through session 25 is committed on `rtx4080-port`; new work stays uncommitted until the
+   maintainer asks for a commit.
 
 ## 11. Stage log
 
@@ -2292,8 +2300,9 @@ grid384 3.44 + A16 grid128 1.35 + quantize 0.4 = **25.6 ms** of a 30.5 ms round.
    irrelevant for a full-wave shape.
 
 **Next.** (a) the Q4 main-head single-pass at T=8 (extend the Q4 small-T geometry to n=248320; the
-session-21 ranking's item 3); (b) split the in-kernel consume with one more probe (x staging vs
-MMA) and try a warp-specialized/leaner consume; (c) the T=9..16 single-pass tile for K=15.
+session-21 ranking's item 3) — **landed session 22**; (b) split the in-kernel consume with one more
+probe (x staging vs MMA) and try a warp-specialized/leaner consume — **landed session 25**
+(direct-register A fragments, §11); (c) the T=9..16 single-pass tile for K=15 — still open.
 
 ### Occupancy/wave-tail experiment: rejected (2026-10-02, session 22)
 
@@ -2374,3 +2383,44 @@ Integration evidence: `ninfer_qwen3_8_27b_dflash2_real_test 7 1 1 1` (K=7, B=1, 
 passes with `accepted=20/20`; the default B=8 argument aborts on the runtime reservation, which is the
 pre-existing 16 GB fit limit, not this change. Full rebuild plus `ctest` exit 0 with the same 13
 expected skips and no `LastTestsFailed.log` update.
+
+### In-kernel Q3 A8 consume cut: direct-register A fragments (2026-10-03, session 25)
+
+**Probe split.** The session-21 next step (split the ~30 us of in-kernel consume) ran on a throwaway
+`profiles/bench/5c-decode-levers/consume_probe.cu` that mirrors the A8 kernel with stage switches and
+instantiates the production kernel as the reference. Under the clean read flush, T=4 production is
+136.2 us against the 107.5 us staging floor, and the off-by-one variants (full minus x-staging /
+decode / B ldmatrix / A ldmatrix / mma / epilogue / reduction) all collapse to 109-113 us: the
+consume is one serialized chain (staged codes -> decode -> barrier -> ldmatrix -> mma -> epilogue),
+and removing any link drops the kernel under the memory stream. A diagnostic warp sync in place of
+the decode barrier is worth only 3-4 us, so the fix is not just fewer barriers.
+
+**Fix: direct-register A fragments.** Each lane now extracts the four 12-bit fields its m16n8k32 A
+registers need straight from the staged 24-byte step (rows gid/gid+8 plus 16*mt, bits
+96*ks + 48*(k&1) + 12*lid; two byte loads, a shift/mask, and the same `spread4`) and feeds the mma.
+The decoded int8 tile, its ldmatrix read and the decode->MMA barrier disappear; the end-of-loop
+barrier is the stage's only block-wide synchronization, and the ring still stages into buffer
+stage-1 while the current stage's codes are read. The arithmetic, K order, mma sequence and
+eight-way reduction are unchanged, so outputs are byte-identical: the probe's 34816x5120 T=4/T=8
+byte-compare against the production kernel is IDENTICAL. `Storage` drops the decoded tile.
+
+Evidence (RTX 4080, `out/qwen3_8_27b_gsq3.ninfer`; logs under `profiles/bench/5c-consume/` and
+`profiles/nsys/session25-*`):
+- Probe clean flush: T=4 136.2 -> 111.6 us (-18.1%); T=8 136.2 -> 113.5 us (-16.7%).
+- `ninfer_linear_bench --flush read` (new option, the session-20 recommendation) on 34816x5120 A8:
+  T=2 140.3 -> 116.7, T=4 141.3 -> 119.8, T=8 149.5 -> 118.8, T=9..13 277.5 -> 203.8 (-27%),
+  T=14..16 258.1 -> 190.5 (-26%). The old dirty-flush numbers move only 2-3 us at T<=8 because the
+  memset writeback masks the consume.
+- Engine, same build, DFlash2 K=7 CLI code scenario greedy: decode 338 -> 301 ms, 121.4 -> 136.1
+  tok/s (+12.1%), output hash `54c59149db5f` and 40.3% acceptance (3.82 tok/round) unchanged.
+  Depth sweep: 8K 136.0 -> 155.4, 28K 232.1 -> 262.3, 56K 204.9 -> 228.7 tok/s; prefill unchanged.
+- nsys `session25-dflash7-8k` (76 rounds): A8 SwiGLU 149.6 -> 136.6 us, plain N=5120 68.6 -> 61.0,
+  N=7168 33.6 -> 30.5; per-round A8 body 19.43 -> 17.53 ms.
+- `ctest` 133/120/13/0; all Q3 op suites pass; `ninfer_qwen3_8_27b_dflash2_real_test 7 1 1 1`
+  accepted=20/20; the n-gram real route passes with 80 wide rounds and 0 added divergences;
+  `git diff --check` clean.
+
+Session-21 item (b) is closed. Item (c) remains: the direct-A route does not remove the double-tile
+cost at T=9..16 (203.8 us against 118.8 at T=8), so DFlash2 K=15 and wide n-gram windows still want
+the native single-pass 16-column tile. Bench tooling now takes `--flush read|memset`; use
+`--flush read` for streaming claims.
