@@ -197,3 +197,6 @@ This NInfer artifact is distributed under the Apache License 2.0. The
 licensed under Apache-2.0, and the DFlash2 companion comes from
 [z-lab/Qwen3.8-27B-DFlash2](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2) (Apache-2.0).
 Users remain responsible for complying with the licenses and applicable laws.
+
+If this artifact is useful to you, you can support the maintainer at
+[Buy Me a Coffee](https://buymeacoffee.com/roofkid).
