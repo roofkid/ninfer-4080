@@ -131,15 +131,23 @@ __device__ __forceinline__ void kv_cache_hadamard64(float& x0, float& x1,
 }
 
 
+// Sixteen packed signed INT4 codes (nibble i is dimension i, the kv_cache_pack_i4 order) to
+// sixteen INT8 codes at a 16-byte aligned destination, bytewise and exact: n ^ 8 is the code
+// plus 8 in [0, 15], adding 0x78 cannot carry out of a byte, and ^ 0x80 leaves the code.
 __device__ __forceinline__ void kv_cache_unpack_i4x16(const std::uint8_t* src8,
                                                       std::int8_t* dst16) {
-    const std::uint64_t raw = load_vec<std::uint64_t>(src8);
-    const auto* bytes       = reinterpret_cast<const std::uint8_t*>(&raw);
+    const uint2 raw = load_vec<uint2>(src8);
+    unsigned out[4];
 #pragma unroll
-    for (int i = 0; i < 8; ++i) {
-        dst16[2 * i]     = kv_cache_unpack_i4(bytes[i], 0);
-        dst16[2 * i + 1] = kv_cache_unpack_i4(bytes[i], 1);
+    for (int i = 0; i < 2; ++i) {
+        const unsigned x  = (i == 0 ? raw.x : raw.y) ^ 0x88888888u;
+        const unsigned lo = ((x & 0x0f0f0f0fu) + 0x78787878u) ^ 0x80808080u;        // d0 d2 d4 d6
+        const unsigned hi = (((x >> 4) & 0x0f0f0f0fu) + 0x78787878u) ^ 0x80808080u; // d1 d3 d5 d7
+        out[2 * i]        = __byte_perm(lo, hi, 0x5140u);
+        out[2 * i + 1]    = __byte_perm(lo, hi, 0x7362u);
     }
+    store_vec(dst16, make_int4(static_cast<int>(out[0]), static_cast<int>(out[1]),
+                               static_cast<int>(out[2]), static_cast<int>(out[3])));
 }
 
 } // namespace ninfer::ops
