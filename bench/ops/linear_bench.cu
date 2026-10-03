@@ -125,6 +125,7 @@ struct Options {
     int warmup                = kDefaultWarmup;
     int repeat                = kDefaultRepeat;
     std::uint64_t flush_bytes = kDefaultFlushBytes;
+    bench::FlushMode flush_mode = bench::FlushMode::Memset;
     std::string csv_out;
 };
 
@@ -350,6 +351,7 @@ void usage(const char* argv0) {
                  "  --warmup N         Warmup calls per point (default %d).\n"
                  "  --repeat N         Measured cold-cache samples per point (default %d).\n"
                  "  --flush-mib N      L2 eviction buffer size (default 256 MiB).\n"
+                 "  --flush MODE       memset (default, dirty L2) or read (clean L2).\n"
                  "  --csv-out PATH     Write all ordinary measurement rows as CSV.\n"
                  "  -h, --help         Show this text.\n",
                  argv0, argv0, argv0, kDefaultWarmup, kDefaultRepeat);
@@ -399,6 +401,15 @@ Options parse_args(int argc, char** argv) {
         } else if (arg == "--flush-mib") {
             opt.flush_bytes =
                 checked_mul(parse_u64(next("flush-mib"), "flush-mib"), 1ULL << 20, "flush bytes");
+        } else if (arg == "--flush") {
+            const std::string_view mode(next("flush"));
+            if (mode == "memset") {
+                opt.flush_mode = bench::FlushMode::Memset;
+            } else if (mode == "read") {
+                opt.flush_mode = bench::FlushMode::Read;
+            } else {
+                throw std::invalid_argument("flush must be memset or read");
+            }
         } else if (arg == "--csv-out") {
             opt.csv_out = next("csv output path");
         } else if (arg == "--help" || arg == "-h") {
@@ -684,8 +695,10 @@ std::vector<Result> run_group(const PointGroup& group, const Options& opt, Devic
                 for (int call = 0; call < opt.graph_calls; ++call) launch(launch_stream);
             });
         bench::ColdTiming timing =
-            opt.graph ? bench::measure_cold_graph(graph, flush, stream, opt.warmup, opt.repeat)
-                      : bench::measure_cold_launch(launch, flush, stream, opt.warmup, opt.repeat);
+            opt.graph ? bench::measure_cold_graph(graph, flush, stream, opt.warmup, opt.repeat,
+                                                  opt.flush_mode)
+                      : bench::measure_cold_launch(launch, flush, stream, opt.warmup, opt.repeat,
+                                                   opt.flush_mode);
         timing.median_us /= opt.graph_calls;
         timing.min_us /= opt.graph_calls;
         timing.p95_us /= opt.graph_calls;

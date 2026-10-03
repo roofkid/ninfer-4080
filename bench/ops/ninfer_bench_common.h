@@ -180,13 +180,37 @@ inline ColdTiming measure_graph(const TimedGraph& graph, cudaStream_t stream, in
     return summarize_timings(std::move(samples));
 }
 
-inline void flush_l2(DeviceBuffer& flush, cudaStream_t stream) {
-    CUDA_CHECK(cudaMemsetAsync(flush.p, 0xa5, flush.bytes, stream));
+enum class FlushMode { Memset, Read };
+
+// Clean-L2 eviction: read the buffer once so the timed kernel starts with no useful lines. The
+// conditional store never fires (it would need the read data to hash to the constant), so the
+// read leaves L2 clean; the memset variant instead leaves dirty lines whose writebacks share DRAM
+// with the timed kernel (session 20 measured a 10-27% streaming penalty).
+__global__ void read_flush_kernel(const uint4* __restrict__ src, long long count,
+                                  unsigned char* __restrict__ sink) {
+    float acc = 0.0F;
+    for (long long i = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x; i < count;
+         i += static_cast<long long>(gridDim.x) * blockDim.x) {
+        const uint4 v = src[i];
+        acc += static_cast<float>(v.x + v.y + v.z + v.w);
+    }
+    if (acc == 12345.678F) { reinterpret_cast<float*>(sink)[0] = acc; }
+}
+
+inline void flush_l2(DeviceBuffer& flush, cudaStream_t stream,
+                     FlushMode mode = FlushMode::Memset) {
+    if (mode == FlushMode::Read) {
+        read_flush_kernel<<<600, 256, 0, stream>>>(
+            static_cast<const uint4*>(flush.p), static_cast<long long>(flush.bytes / 16),
+            static_cast<unsigned char*>(flush.p));
+    } else {
+        CUDA_CHECK(cudaMemsetAsync(flush.p, 0xa5, flush.bytes, stream));
+    }
 }
 
 template <class Launch>
 ColdTiming measure_cold_launch(Launch&& launch, DeviceBuffer& flush, cudaStream_t stream,
-                               int warmup, int repeat) {
+                               int warmup, int repeat, FlushMode mode = FlushMode::Memset) {
     if (warmup < 0 || repeat <= 0) {
         throw std::invalid_argument(
             "cold benchmark requires nonnegative warmup and positive repeat");
@@ -198,7 +222,7 @@ ColdTiming measure_cold_launch(Launch&& launch, DeviceBuffer& flush, cudaStream_
     CUDA_CHECK(cudaEventCreate(&stop));
 
     for (int index = 0; index < warmup; ++index) {
-        flush_l2(flush, stream);
+        flush_l2(flush, stream, mode);
         launch(stream);
     }
     CUDA_CHECK(cudaStreamSynchronize(stream));
@@ -206,7 +230,7 @@ ColdTiming measure_cold_launch(Launch&& launch, DeviceBuffer& flush, cudaStream_
     std::vector<double> samples;
     samples.reserve(static_cast<std::size_t>(repeat));
     for (int index = 0; index < repeat; ++index) {
-        flush_l2(flush, stream);
+        flush_l2(flush, stream, mode);
         CUDA_CHECK(cudaEventRecord(start, stream));
         launch(stream);
         CUDA_CHECK(cudaEventRecord(stop, stream));
@@ -228,13 +252,14 @@ ColdTiming measure_cold_launch(Launch&& launch, DeviceBuffer& flush, cudaStream_
 }
 
 inline ColdTiming measure_cold_graph(const TimedGraph& graph, DeviceBuffer& flush,
-                                     cudaStream_t stream, int warmup, int repeat) {
+                                     cudaStream_t stream, int warmup, int repeat,
+                                     FlushMode mode = FlushMode::Memset) {
     if (warmup < 0 || repeat <= 0) {
         throw std::invalid_argument(
             "cold benchmark requires nonnegative warmup and positive repeat");
     }
     for (int index = 0; index < warmup; ++index) {
-        flush_l2(flush, stream);
+        flush_l2(flush, stream, mode);
         graph.launch(stream);
     }
     CUDA_CHECK(cudaStreamSynchronize(stream));
@@ -242,7 +267,7 @@ inline ColdTiming measure_cold_graph(const TimedGraph& graph, DeviceBuffer& flus
     std::vector<double> samples;
     samples.reserve(static_cast<std::size_t>(repeat));
     for (int index = 0; index < repeat; ++index) {
-        flush_l2(flush, stream);
+        flush_l2(flush, stream, mode);
         samples.push_back(graph.launch_timed(stream));
     }
     std::sort(samples.begin(), samples.end());
