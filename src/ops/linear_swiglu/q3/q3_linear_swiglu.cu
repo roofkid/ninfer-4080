@@ -90,8 +90,10 @@ void q3_linear_swiglu_dispatch(const Tensor& x, const Weight& w, Tensor& out,
         a8_g64_quantize(x, act, stream);
         if (columns >= kQ3A8MinTokens) {
             launch_q3_mma_tall_a8_swiglu_r64_c128(act, w, out, stream);
-        } else {
+        } else if (columns <= q3_small_t::kTokens) {
             launch_q3_mma_small_t_a8_swiglu_r16_c8(act, w, out, stream);
+        } else {
+            launch_q3_mma_small_t_a8_swiglu_r16_c16(act, w, out, stream);
         }
         return;
     }
@@ -100,7 +102,11 @@ void q3_linear_swiglu_dispatch(const Tensor& x, const Weight& w, Tensor& out,
     // geometry fits it, and only the wider narrow widths keep the column-chunked FP32 plane.
     if (columns >= 2 && columns <= q3_small_t::kMaxTokens && (w.k % 8) == 0 &&
         (w.padded_shape[1] % q3_small_t::kGroupK) == 0) {
-        launch_q3_mma_small_t_swiglu_r16_c8(x, w, out, stream);
+        if (columns <= q3_small_t::kTokens) {
+            launch_q3_mma_small_t_swiglu_r16_c8(x, w, out, stream);
+        } else {
+            launch_q3_mma_small_t_swiglu_r16_c16(x, w, out, stream);
+        }
         return;
     }
     if (columns <= kGemvColumns) {

@@ -21,6 +21,8 @@ inline constexpr std::int32_t kQ3A8StepK = 64;
 inline constexpr std::int32_t kQ3SmallTRows = 32;
 inline constexpr std::int32_t kQ3SmallTStepK = 256;
 inline constexpr std::int32_t kQ3SmallTMaxTokens = 16;
+// The narrow small-T tile; 9..kQ3SmallTMaxTokens use the native 16-column tile.
+inline constexpr std::int32_t kQ3SmallTNarrowTokens = 8;
 inline constexpr std::int32_t kQ3SmallTA8MinTokens = 2;
 inline constexpr std::int32_t kQ3SmallTA8StepK = 512;
 Q3Launch select_q3_a16_launch(std::int32_t n, std::int32_t k, std::int32_t padded_k,

@@ -180,6 +180,55 @@ int run_shape(std::string_view label, std::int32_t n, std::int32_t k, std::uint3
     return failures;
 }
 
+// The native 16-column tile stages the same codes and runs the same per-column MMA sequence as the
+// 8-column tile, so its first eight columns must reproduce that route byte for byte.
+int wide_tile_parity() {
+    constexpr std::int32_t n = 1024;
+    constexpr std::int32_t k = 5120;
+    const auto packed = make_q3g128_f16s_weight(n, k, 653U);
+    DeviceBuffer weight_device(packed.payload.size());
+    weight_device.copy_from_host(packed.payload.data(), weight_device.bytes);
+    const Weight weight = packed.device_weight(weight_device.p);
+
+    const std::vector<std::uint16_t> activation = make_a8_activation_bits(k, 16, 659U);
+    DeviceBuffer activation_device(activation.size() * sizeof(std::uint16_t));
+    activation_device.copy_from_host(activation.data(), activation_device.bytes);
+
+    const auto run = [&](std::int32_t t) {
+        const std::size_t elements = static_cast<std::size_t>(n) * t;
+        GuardedDeviceBuffer output(elements * sizeof(std::uint16_t));
+        Tensor x(activation_device.p, DType::BF16, {k, t});
+        Tensor destination(output.data(), DType::BF16, {n, t});
+        const std::size_t capacity = ops::linear_workspace_capacity_bytes(
+            QType::Q3G128_F16S, n, k, ops::LinearPolicy::AllowA8, t, t);
+        DeviceArena workspace(std::max<std::size_t>(capacity, 256));
+        ops::linear(x, weight, destination, ops::LinearPolicy::AllowA8, workspace, nullptr);
+        test::cuda_check(cudaDeviceSynchronize(), "synchronize q3 small-t a8 wide parity");
+        std::vector<std::uint16_t> bits(elements);
+        output.copy_to_host(bits.data(), elements * sizeof(std::uint16_t));
+        return bits;
+    };
+
+    const std::vector<std::uint16_t> narrow = run(8);
+    int failures = 0;
+    for (const std::int32_t t : {9, 16}) {
+        const std::vector<std::uint16_t> wide = run(t);
+        for (std::int32_t column = 0; column < 8; ++column) {
+            for (std::int32_t row = 0; row < n; ++row) {
+                const std::size_t index = static_cast<std::size_t>(column) * n + row;
+                if (wide[index] != narrow[index]) {
+                    if (failures < 8) {
+                        std::cerr << "Q3 small-T A8 wide parity: T=" << t << " column " << column
+                                  << " row " << row << " differs\n";
+                    }
+                    ++failures;
+                }
+            }
+        }
+    }
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -189,8 +238,8 @@ int main() {
     }
 
     try {
-        int failures = check_route_boundaries();
         // The whole small-T A8 domain on one registered shape.
+        int failures = check_route_boundaries() + wide_tile_parity();
         constexpr std::array kSmallA8{2, 3, 4, 8, 9, 12, 16};
         constexpr std::array kSmallA16{1, 17, 128};
         failures += run_shape("Q3 small-T A8", 1024, 5120, 611U, kSmallA8, kSmallA16);

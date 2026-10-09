@@ -18,7 +18,10 @@ Q3Launch select_q3_a16_launch(std::int32_t n, std::int32_t k, std::int32_t padde
     if (t <= kQ3SmallTMaxTokens) {
         const bool small_t = t >= 2 && (n % kQ3SmallTRows) == 0 && (k % 8) == 0 && padded_k >= k &&
                              (padded_k % kQ3SmallTStepK) == 0;
-        if (small_t) { return launch_q3_mma_small_t_r32_c8; }
+        if (small_t) {
+            return t <= kQ3SmallTNarrowTokens ? launch_q3_mma_small_t_r32_c8
+                                              : launch_q3_mma_small_t_r32_c16;
+        }
         if (t <= 8) { return launch_q3_gemv_r8_c8_staged; }
         return launch_q3_mma_r32_c64;
     }
@@ -76,8 +79,10 @@ void q3_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy pol
         a8_g64_quantize(x, act, stream);
         if (x.ne[1] >= kQ3A8MinTokens) {
             launch_q3_mma_tall_a8_r128_c128(act, w, out, stream);
-        } else {
+        } else if (x.ne[1] <= kQ3SmallTNarrowTokens) {
             launch_q3_mma_small_t_a8_r32_c8(act, w, out, stream);
+        } else {
+            launch_q3_mma_small_t_a8_r32_c16(act, w, out, stream);
         }
         return;
     }

@@ -43,6 +43,23 @@ void require_small_t_swiglu_shape(const Tensor& x, const Weight& w, const Tensor
 void launch_q3_mma_small_t_r32_c8(const Tensor& x, const Weight& w, Tensor& out,
                                   cudaStream_t stream) {
     require_small_t_linear_shape(x, w, out);
+    if (x.ne[1] > q3_small_t::kTokens) {
+        throw std::invalid_argument("q3 small-T MMA linear: the 8-column tile owns 1..8 tokens");
+    }
+    const std::int32_t padded_k = static_cast<std::int32_t>(w.padded_shape[1]);
+    const q3_small_t::Q3SmallTLinearProblem problem{
+        static_cast<const std::uint8_t*>(w.qdata), static_cast<const std::uint16_t*>(w.scales),
+        static_cast<__nv_bfloat16*>(out.data), out.ne[0], padded_k / Q3RowSplitStorage::kGroupK};
+    q3_small_t::launch(problem, w.n / q3_small_t::kRows,
+                       static_cast<const __nv_bfloat16*>(x.data), w.k, padded_k, x.ne[1], stream);
+}
+
+void launch_q3_mma_small_t_r32_c16(const Tensor& x, const Weight& w, Tensor& out,
+                                   cudaStream_t stream) {
+    require_small_t_linear_shape(x, w, out);
+    if (x.ne[1] <= q3_small_t::kTokens || x.ne[1] > q3_small_t::kWideTokens) {
+        throw std::invalid_argument("q3 small-T MMA linear: the 16-column tile owns 9..16 tokens");
+    }
     const std::int32_t padded_k = static_cast<std::int32_t>(w.padded_shape[1]);
     const q3_small_t::Q3SmallTLinearProblem problem{
         static_cast<const std::uint8_t*>(w.qdata), static_cast<const std::uint16_t*>(w.scales),
@@ -54,6 +71,23 @@ void launch_q3_mma_small_t_r32_c8(const Tensor& x, const Weight& w, Tensor& out,
 void launch_q3_mma_small_t_swiglu_r16_c8(const Tensor& x, const Weight& w, Tensor& out,
                                          cudaStream_t stream) {
     require_small_t_swiglu_shape(x, w, out);
+    if (x.ne[1] > q3_small_t::kTokens) {
+        throw std::invalid_argument("q3 small-T MMA swiglu: the 8-column tile owns 1..8 tokens");
+    }
+    const std::int32_t padded_k = static_cast<std::int32_t>(w.padded_shape[1]);
+    const q3_small_t::Q3SmallTSwiGluProblem problem{
+        static_cast<const std::uint8_t*>(w.qdata), static_cast<const std::uint16_t*>(w.scales),
+        static_cast<__nv_bfloat16*>(out.data), out.ne[0], padded_k / Q3RowSplitStorage::kGroupK};
+    q3_small_t::launch(problem, out.ne[0] / 16, static_cast<const __nv_bfloat16*>(x.data), w.k,
+                       padded_k, x.ne[1], stream);
+}
+
+void launch_q3_mma_small_t_swiglu_r16_c16(const Tensor& x, const Weight& w, Tensor& out,
+                                          cudaStream_t stream) {
+    require_small_t_swiglu_shape(x, w, out);
+    if (x.ne[1] <= q3_small_t::kTokens || x.ne[1] > q3_small_t::kWideTokens) {
+        throw std::invalid_argument("q3 small-T MMA swiglu: the 16-column tile owns 9..16 tokens");
+    }
     const std::int32_t padded_k = static_cast<std::int32_t>(w.padded_shape[1]);
     const q3_small_t::Q3SmallTSwiGluProblem problem{
         static_cast<const std::uint8_t*>(w.qdata), static_cast<const std::uint16_t*>(w.scales),

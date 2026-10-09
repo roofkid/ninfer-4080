@@ -13,9 +13,11 @@
 //   * a three-buffer staging ring: every stage's codes and activation travel together, and the
 //     loop issues two stages ahead, so one stage's copies are always in flight while the previous
 //     stage is decoded and multiplied;
-//   * a small CTA footprint: 32 weight rows x one 8-column token tile per CTA (9..16 columns
-//     run two tiles), which keeps several CTAs resident per SM: staging four activation rows
-//     needs about 32 KiB and keeps three; the eight-row shape needs about 38 KiB and keeps two;
+//   * a small CTA footprint: 32 weight rows x one token tile per CTA, 8 columns for the decode
+//     and MTP verify widths and a native 16 columns for the DFlash2 and wide n-gram windows, which
+//     keeps several CTAs resident per SM: staging four activation rows needs about 31 KiB and keeps
+//     three; the eight-row shape needs about 37 KiB and keeps two; the sixteen-row shape needs
+//     about 38 KiB and keeps two;
 //   * K-split: the eight warps split each 256-code stage, each warp owning two 16-code slices,
 //     and a shared-memory tree reduces their accumulators once per CTA.
 //
@@ -44,14 +46,16 @@
 
 namespace ninfer::ops::detail::q3_small_t {
 
-// CTA tile: 32 physical weight rows, up to 8 token columns, K walked in 256-code (two-group)
-// stages. Every registered Q3 parent's padded K is a multiple of 256.
+// CTA tile: 32 physical weight rows, one 8- or 16-token column tile, K walked in 256-code
+// (two-group) stages. Every registered Q3 parent's padded K is a multiple of 256.
 constexpr int kRows           = 32;
-constexpr int kTokens         = 8;
-// Widths above one 8-column tile run one CTA per tile (at most two), token tile fastest in the
-// grid so a row block's CTAs share its code bytes in L2.
-constexpr int kMaxTokenTiles = 2;
-constexpr int kMaxTokens     = kTokens * kMaxTokenTiles;
+// Tokens per CTA tile: eight for the decode and MTP verify widths, sixteen for the DFlash2 and
+// wide n-gram verify windows, where a second eight-column tile would duplicate the whole weight
+// stream. One CTA owns one row block and one tile, so 9..16 columns load every code byte once.
+constexpr int kTokens   = 8;
+constexpr int kWideTokens = 16;
+constexpr int kTokensPerB = 8;
+constexpr int kMaxTokens  = kWideTokens;
 constexpr int kWarps          = 8;
 constexpr int kThreads        = kWarps * 32;
 constexpr int kGroupK         = 256;
@@ -63,23 +67,33 @@ constexpr int kSlicesPerWarp  = kSlicesPerStage / kWarps;
 constexpr int kM16Tiles       = 2;
 constexpr int kDecodeItemsPerStage = kRows * kGroupsPerStage * 4;
 
-// Staging ring: three buffers keep two stages of copies in flight plus the one being decoded,
-// and every stage's codes and activation travel together so the ring has a single owner.
-constexpr int kCodeBuffers = 3;
-constexpr int kOutstandingGroups = 1;
-
+// Staging ring: three buffers keep two stages of copies in flight plus the one being decoded, and
+// every stage's codes and activation travel together so the ring has a single owner. The wide tile
+// stages sixteen activation rows and decodes the full 32x256 tile, so its ring is one shallower:
+// two buffers leave two CTAs resident per SM inside the 48 KiB static shared-memory limit.
+template <int StageTokens>
+__host__ __device__ constexpr int code_buffers() {
+    return StageTokens == kWideTokens ? 2 : 3;
+}
+template <int StageTokens>
+__host__ __device__ constexpr int outstanding_groups() {
+    return code_buffers<StageTokens>() - 2;
+}
 static_assert(kSlicesPerStage % kWarps == 0);
 static_assert(kDecodeItemsPerStage == kThreads, "one decode quarter per thread per stage");
 static_assert(kStageCodeBytes == 96);
-static_assert(kCodeBuffers == kOutstandingGroups + 2, "the ring keeps two ready stages ahead");
 // Per-CTA staging bytes for `StageTokens` activation rows.
-constexpr int stage_bytes(int stage_tokens) {
-    return kCodeBuffers * (kStageCodeBytes * kRows + kGroupsPerStage * kRows * 2 +
-                           stage_tokens * kGroupK * 2) +
+template <int StageTokens>
+__host__ __device__ constexpr int stage_bytes() {
+    return code_buffers<StageTokens>() *
+               (kStageCodeBytes * kRows + kGroupsPerStage * kRows * 2 + StageTokens * kGroupK * 2) +
            kRows * kGroupK * 2;
 }
-static_assert(stage_bytes(4) * 3 + 3 * 1024 <= 102400, "three CTAs must fit four activation rows");
-static_assert(stage_bytes(kTokens) * 2 + 2 * 1024 <= 102400, "two CTAs must fit eight rows");
+static_assert(stage_bytes<4>() * 3 + 3 * 1024 <= 102400, "three CTAs must fit four activation rows");
+static_assert(stage_bytes<8>() * 2 + 2 * 1024 <= 102400, "two CTAs must fit eight activation rows");
+static_assert(stage_bytes<kWideTokens>() * 2 + 2 * 1024 <= 102400,
+              "two CTAs must fit sixteen activation rows");
+static_assert(stage_bytes<kWideTokens>() <= 48 * 1024, "the wide tile must fit static shared memory");
 
 template <int StageTokens>
 struct Stage {
@@ -94,7 +108,7 @@ template <int StageTokens>
 struct Storage {
     union {
         struct {
-            Stage<StageTokens> stage[kCodeBuffers];
+            Stage<StageTokens> stage[code_buffers<StageTokens>()];
             __align__(16) __nv_bfloat16 decoded[kRows][kGroupK];
         } work;
         __align__(16) float partial[kWarps][kM16Tiles][32][4];
@@ -186,23 +200,26 @@ struct Q3SmallTSwiGluProblem {
     }
 };
 
-// StageTokens is 4 or 8: four rows are enough for the decode and MTP verify widths and keep
-// three CTAs resident, eight rows serve the wider verify windows.
-template <class Problem, int StageTokens = 4>
-__global__ void __launch_bounds__(kThreads, StageTokens == 4 ? 3 : 2)
+// TileTokens is 8 or 16 columns and StageTokens is 4, 8 or 16 activation rows: four rows are
+// enough for the decode and MTP verify widths and keep three CTAs resident, eight rows serve the
+// wider verify windows, and sixteen rows give the 9..16-column windows one CTA per row block.
+template <class Problem, int TileTokens, int StageTokens>
+__global__ void __launch_bounds__(kThreads, TileTokens == kTokens ? (StageTokens == 4 ? 3 : 2) : 2)
     q3_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x, Problem problem, std::int32_t k,
-                          std::int32_t padded_k, std::int32_t tokens,
-                          std::int32_t token_tiles) {
-    static_assert(StageTokens == 4 || StageTokens == 8);
+                          std::int32_t padded_k, std::int32_t tokens) {
+    static_assert(TileTokens == kTokens || TileTokens == kWideTokens);
+    static_assert(StageTokens == 4 || StageTokens == 8 || StageTokens == kWideTokens);
+    static_assert(StageTokens <= TileTokens);
+    constexpr int kTileHalves  = TileTokens / kTokensPerB;
+    constexpr int kRing        = code_buffers<StageTokens>();
+    constexpr int kOutstanding = outstanding_groups<StageTokens>();
     __shared__ Storage<StageTokens> storage;
 
     const int tid       = static_cast<int>(threadIdx.x);
     const int warp      = tid >> 5;
     const int lane      = tid & 31;
-    const int tile      = static_cast<int>(blockIdx.x);
-    const int row_block = tile / token_tiles;
-    const int token0    = (tile % token_tiles) * kTokens;
-    const int live      = min(kTokens, tokens - token0);
+    const int row_block = static_cast<int>(blockIdx.x);
+    const int live      = min(TileTokens, tokens);
     const std::int32_t stages = padded_k / kGroupK;
 
     // Whole-group staging: the codes of one row's stage are 96 contiguous bytes (six 16-byte
@@ -218,15 +235,38 @@ __global__ void __launch_bounds__(kThreads, StageTokens == 4 ? 3 : 2)
                 problem.code_row(row_block, row) + static_cast<std::int64_t>(stage) * kStageCodeBytes +
                     chunk * 16);
         }
-        if (tid < StageTokens * 32) {
+        // One 16-byte activation chunk per item. Eight rows fit one item per thread exactly, four
+        // rows use the lower half and the wide tile walks two; spelling the three shapes out keeps
+        // the narrow instantiations free of the branch a guard would add and of the speculative
+        // unrolling a runtime-bounded loop produces.
+        if constexpr (StageTokens * 32 == kThreads) {
             const int token = tid >> 5;
             const int chunk = tid & 31;
             const std::int32_t k0 = stage * kGroupK + chunk * 8;
             const bool ok = token < live && k0 < k;
             const __nv_bfloat16* src =
-                x + static_cast<std::int64_t>(ok ? token0 + token : token0) * k +
-                (ok ? k0 : 0);
+                x + static_cast<std::int64_t>(ok ? token : 0) * k + (ok ? k0 : 0);
             cp_async_zfill<16>(&target.x[token][(chunk ^ (token & 7)) * 8], src, ok ? 16 : 0);
+        } else if constexpr (StageTokens * 32 < kThreads) {
+            if (tid < StageTokens * 32) {
+                const int token = tid >> 5;
+                const int chunk = tid & 31;
+                const std::int32_t k0 = stage * kGroupK + chunk * 8;
+                const bool ok = token < live && k0 < k;
+                const __nv_bfloat16* src =
+                    x + static_cast<std::int64_t>(ok ? token : 0) * k + (ok ? k0 : 0);
+                cp_async_zfill<16>(&target.x[token][(chunk ^ (token & 7)) * 8], src, ok ? 16 : 0);
+            }
+        } else {
+            for (int item = tid; item < StageTokens * 32; item += kThreads) {
+                const int token = item >> 5;
+                const int chunk = item & 31;
+                const std::int32_t k0 = stage * kGroupK + chunk * 8;
+                const bool ok = token < live && k0 < k;
+                const __nv_bfloat16* src =
+                    x + static_cast<std::int64_t>(ok ? token : 0) * k + (ok ? k0 : 0);
+                cp_async_zfill<16>(&target.x[token][(chunk ^ (token & 7)) * 8], src, ok ? 16 : 0);
+            }
         }
         if (tid < kRows) {
             cp_async<4>(&target.scale[tid][0],
@@ -267,12 +307,12 @@ __global__ void __launch_bounds__(kThreads, StageTokens == 4 ? 3 : 2)
         }
     };
 
-    float acc[kM16Tiles][4] = {};
+    float acc[kTileHalves][kM16Tiles][4] = {};
 
     // Prologue: two stages fill the ring, so the loop always has the next stage complete and the
     // stage after it in flight.
 #pragma unroll
-    for (int prefetch = 0; prefetch < kCodeBuffers - 1; ++prefetch) {
+    for (int prefetch = 0; prefetch < kRing - 1; ++prefetch) {
         if (prefetch < stages) {
             issue_stage(prefetch, prefetch);
         } else {
@@ -283,14 +323,14 @@ __global__ void __launch_bounds__(kThreads, StageTokens == 4 ? 3 : 2)
     __syncthreads();
 
     for (std::int32_t stage = 0; stage < stages; ++stage) {
-        const int buffer = static_cast<int>(stage % kCodeBuffers);
+        const int buffer = static_cast<int>(stage % kRing);
         decode(buffer);
         // The decoded tile is visible to every warp, and the buffer this stage just read can be
-        // refilled by the copies of stage + kCodeBuffers.
+        // refilled by the copies of stage + kRing.
         __syncthreads();
-        if (stage + kCodeBuffers - 1 < stages) {
-            issue_stage(static_cast<int>(stage) + kCodeBuffers - 1,
-                        static_cast<int>((stage + kCodeBuffers - 1) % kCodeBuffers));
+        if (stage + kRing - 1 < stages) {
+            issue_stage(static_cast<int>(stage) + kRing - 1,
+                        static_cast<int>((stage + kRing - 1) % kRing));
         } else {
             cp_commit();
         }
@@ -300,14 +340,17 @@ __global__ void __launch_bounds__(kThreads, StageTokens == 4 ? 3 : 2)
             const int slice = warp * kSlicesPerWarp + item;
             const int group = slice >> 3;
             const int ks    = slice & 7;
-            unsigned b0 = 0;
-            unsigned b1 = 0;
-            {
-                const int token = min(lane & 7, StageTokens - 1);
+            // One A fragment pair serves every token half; only the B fragment of each eight-column
+            // half changes, so the decoded weights and the code stream are read once per row block.
+            unsigned b[kTileHalves][2];
+#pragma unroll
+            for (int half = 0; half < kTileHalves; ++half) {
+                const int token = min((lane & 7) + kTokensPerB * half, StageTokens - 1);
                 const unsigned off =
                     ((static_cast<unsigned>((lane >> 3) & 1) ^ static_cast<unsigned>(token & 7)) << 4) ^
                     (static_cast<unsigned>(slice) << 5);
-                ldmatrix_x2(b0, b1, smem_addr(&storage.work.stage[buffer].x[token][0]) + off);
+                ldmatrix_x2(b[half][0], b[half][1],
+                            smem_addr(&storage.work.stage[buffer].x[token][0]) + off);
             }
             const unsigned l7 = static_cast<unsigned>(lane & 7);
             const unsigned h  = static_cast<unsigned>(lane >> 4);
@@ -319,14 +362,18 @@ __global__ void __launch_bounds__(kThreads, StageTokens == 4 ? 3 : 2)
                 ldmatrix_x4(a0, a1, a2, a3,
                             smem_addr(&storage.work.decoded[a_row][0]) +
                                 static_cast<unsigned>(group * 256) + ax);
-                mma_bf16(acc[t][0], acc[t][1], acc[t][2], acc[t][3], a0, a1, a2, a3, b0, b1);
+#pragma unroll
+                for (int half = 0; half < kTileHalves; ++half) {
+                    mma_bf16(acc[half][t][0], acc[half][t][1], acc[half][t][2], acc[half][t][3], a0, a1,
+                             a2, a3, b[half][0], b[half][1]);
+                }
             }
         }
 
         // Leave the pipeline's in-flight window outstanding; the sync publishes the stages the
         // next iterations consume and proves every warp is done with this stage's tile.
-        if (stage + kOutstandingGroups < stages) {
-            cp_wait<kOutstandingGroups>();
+        if (stage + kOutstanding < stages) {
+            cp_wait<kOutstanding>();
         } else {
             cp_wait<0>();
         }
@@ -334,64 +381,72 @@ __global__ void __launch_bounds__(kThreads, StageTokens == 4 ? 3 : 2)
     }
 
     // K-split reduction: odd warps publish, even warps fold their partner and republish, warp 0
-    // owns the final sum.
-    const auto store_partial = [&](int split) {
+    // owns the final sum. Each eight-column half reduces and emits independently, so the decoded
+    // tile and the code stream still serve both halves.
 #pragma unroll
-        for (int t = 0; t < kM16Tiles; ++t) {
-            *reinterpret_cast<float4*>(&storage.partial[split][t][lane][0]) =
-                make_float4(acc[t][0], acc[t][1], acc[t][2], acc[t][3]);
-        }
-    };
-    if ((warp & 1) != 0) { store_partial(warp); }
-    __syncthreads();
-    if ((warp & 1) == 0) {
-#pragma unroll
-        for (int t = 0; t < kM16Tiles; ++t) {
-            const float4 partner =
-                *reinterpret_cast<const float4*>(&storage.partial[warp + 1][t][lane][0]);
-            acc[t][0] += partner.x;
-            acc[t][1] += partner.y;
-            acc[t][2] += partner.z;
-            acc[t][3] += partner.w;
-        }
-        if (warp != 0) { store_partial(warp); }
-    }
-    __syncthreads();
-    if (warp == 0) {
-#pragma unroll
-        for (int split = 2; split < kWarps; split += 2) {
+    for (int half = 0; half < kTileHalves; ++half) {
+        const auto store_partial = [&](int split) {
 #pragma unroll
             for (int t = 0; t < kM16Tiles; ++t) {
-                const float4 value =
-                    *reinterpret_cast<const float4*>(&storage.partial[split][t][lane][0]);
-                acc[t][0] += value.x;
-                acc[t][1] += value.y;
-                acc[t][2] += value.z;
-                acc[t][3] += value.w;
+                *reinterpret_cast<float4*>(&storage.partial[split][t][lane][0]) =
+                    make_float4(acc[half][t][0], acc[half][t][1], acc[half][t][2], acc[half][t][3]);
             }
+        };
+        if ((warp & 1) != 0) { store_partial(warp); }
+        __syncthreads();
+        if ((warp & 1) == 0) {
+#pragma unroll
+            for (int t = 0; t < kM16Tiles; ++t) {
+                const float4 partner =
+                    *reinterpret_cast<const float4*>(&storage.partial[warp + 1][t][lane][0]);
+                acc[half][t][0] += partner.x;
+                acc[half][t][1] += partner.y;
+                acc[half][t][2] += partner.z;
+                acc[half][t][3] += partner.w;
+            }
+            if (warp != 0) { store_partial(warp); }
         }
-        problem.emit(row_block, token0, lane, acc, tokens);
+        __syncthreads();
+        if (warp == 0) {
+#pragma unroll
+            for (int split = 2; split < kWarps; split += 2) {
+#pragma unroll
+                for (int t = 0; t < kM16Tiles; ++t) {
+                    const float4 value =
+                        *reinterpret_cast<const float4*>(&storage.partial[split][t][lane][0]);
+                    acc[half][t][0] += value.x;
+                    acc[half][t][1] += value.y;
+                    acc[half][t][2] += value.z;
+                    acc[half][t][3] += value.w;
+                }
+            }
+            problem.emit(row_block, kTokensPerB * half, lane, acc[half], tokens);
+        }
+        if (half + 1 < kTileHalves) { __syncthreads(); }
     }
 }
 
-// Launches one CTA per (row block, 8-column token tile) over an activation of `tokens` columns
-// (1..16), token tile fastest. The weight's padded K must be a whole number of 256-code stages
-// and the logical K must not exceed it.
+// Launches one CTA per row block over an activation of `tokens` columns (1..16): the narrow tile
+// owns 1..8 columns and the wide tile 9..16, so every code byte of a row block is loaded once. The
+// weight's padded K must be a whole number of 256-code stages and the logical K must not exceed it.
 template <class Problem>
 void launch(const Problem& problem, std::int32_t row_blocks, const __nv_bfloat16* x,
             std::int32_t k, std::int32_t padded_k, std::int32_t tokens, cudaStream_t stream) {
     if (tokens <= 0 || tokens > kMaxTokens) {
         throw std::invalid_argument("q3 small-T MMA: unsupported token extent");
     }
-    const std::int32_t token_tiles = (tokens + kTokens - 1) / kTokens;
-    const unsigned grid =
-        static_cast<unsigned>(row_blocks) * static_cast<unsigned>(token_tiles);
-    if (tokens <= 4) {
-        q3_small_t_mma_kernel<Problem, 4><<<grid, kThreads, 0, stream>>>(x, problem, k, padded_k,
-                                                                        tokens, token_tiles);
+    const unsigned grid = static_cast<unsigned>(row_blocks);
+    if (tokens <= kTokens) {
+        if (tokens <= 4) {
+            q3_small_t_mma_kernel<Problem, kTokens, 4><<<grid, kThreads, 0, stream>>>(
+                x, problem, k, padded_k, tokens);
+        } else {
+            q3_small_t_mma_kernel<Problem, kTokens, kTokens><<<grid, kThreads, 0, stream>>>(
+                x, problem, k, padded_k, tokens);
+        }
     } else {
-        q3_small_t_mma_kernel<Problem, 8><<<grid, kThreads, 0, stream>>>(x, problem, k, padded_k,
-                                                                        tokens, token_tiles);
+        q3_small_t_mma_kernel<Problem, kWideTokens, kWideTokens><<<grid, kThreads, 0, stream>>>(
+            x, problem, k, padded_k, tokens);
     }
     CUDA_CHECK(cudaGetLastError());
 }

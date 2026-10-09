@@ -14,9 +14,10 @@
 // group order is ascending in K and the final step is the same eight-way partial tree the A16
 // small-T route uses.
 //
-// Structure. One CTA owns 32 weight rows and one 8-column token tile (9..16 columns run two
-// tiles, token tile fastest in the grid). A stage is 512 codes: four 128-code weight groups and
-// eight 64-code activation groups, one per warp. The whole stage's codes, weight scales,
+// Structure. One CTA owns 32 weight rows and one token tile, 8 columns for the decode and MTP
+// verify widths and a native 16 columns for the DFlash2 and wide n-gram verify windows. A stage is
+// 512 codes: four 128-code weight groups and eight 64-code activation groups, one per warp. The
+// whole stage's codes, weight scales,
 // quantized activation and activation scales are copied with cp.async into a three-buffer ring.
 //
 // The A fragment is spread straight from the staged codes: each lane extracts the four 12-bit
@@ -42,13 +43,14 @@
 
 namespace ninfer::ops::detail::q3_small_t_a8 {
 
-using q3_small_t::kMaxTokenTiles;
 using q3_small_t::kMaxTokens;
 using q3_small_t::kM16Tiles;
 using q3_small_t::kRows;
 using q3_small_t::kThreads;
 using q3_small_t::kTokens;
+using q3_small_t::kTokensPerB;
 using q3_small_t::kWarps;
+using q3_small_t::kWideTokens;
 using q3_small_t::Q3SmallTLinearProblem;
 using q3_small_t::Q3SmallTSwiGluProblem;
 
@@ -94,13 +96,17 @@ struct Storage {
 };
 
 template <int StageTokens>
-constexpr int stage_bytes() {
+__host__ __device__ constexpr int stage_bytes() {
     return kCodeBuffers * (kRows * kStageCodeBytes + StageTokens * kStageK +
                            kRows * kWeightGroupsPerStage * 2 +
                            StageTokens * kActGroupsPerStage * 4);
 }
 static_assert(stage_bytes<4>() * 2 + 2 * 1024 <= 102400, "two CTAs must fit four activation rows");
 static_assert(stage_bytes<8>() * 2 + 2 * 1024 <= 102400, "two CTAs must fit eight activation rows");
+static_assert(stage_bytes<kWideTokens>() * 2 + 2 * 1024 <= 102400,
+              "two CTAs must fit sixteen activation rows");
+static_assert(stage_bytes<kWideTokens>() <= 48 * 1024,
+              "the wide tile must fit static shared memory");
 
 // 16-byte chunk c of the 64-code step with swizzle line `line` sits at chunk c ^ ((line >> 1) & 3).
 __device__ __forceinline__ unsigned swizzled_chunk(unsigned chunk, int line) {
@@ -116,12 +122,15 @@ __device__ __forceinline__ unsigned field12(const std::uint8_t* base, int bit) {
     return (raw >> (bit & 7)) & 0xfffu;
 }
 
-template <class Problem, int StageTokens = 4>
+template <class Problem, int TileTokens, int StageTokens>
 __global__ void __launch_bounds__(kThreads, 2)
     q3_small_t_a8_mma_kernel(const std::int8_t* __restrict__ qx,
                              const float* __restrict__ x_scale, Problem problem, std::int32_t k,
-                             std::int32_t tokens, std::int32_t token_tiles) {
-    static_assert(StageTokens == 4 || StageTokens == 8);
+                             std::int32_t tokens) {
+    static_assert(TileTokens == kTokens || TileTokens == kWideTokens);
+    static_assert(StageTokens == 4 || StageTokens == 8 || StageTokens == kWideTokens);
+    static_assert(StageTokens <= TileTokens);
+    constexpr int kTileHalves = TileTokens / kTokensPerB;
     __shared__ Storage<StageTokens> storage;
 
     const int tid       = static_cast<int>(threadIdx.x);
@@ -129,10 +138,8 @@ __global__ void __launch_bounds__(kThreads, 2)
     const int lane      = tid & 31;
     const int gid       = lane >> 2;
     const int lid       = lane & 3;
-    const int tile      = static_cast<int>(blockIdx.x);
-    const int row_block = tile / token_tiles;
-    const int token0    = (tile % token_tiles) * kTokens;
-    const int live      = min(kTokens, tokens - token0);
+    const int row_block = static_cast<int>(blockIdx.x);
+    const int live      = min(TileTokens, tokens);
     const int stages    = k / kStageK;
 
     // Whole-stage staging: the codes of one row's stage are 192 contiguous bytes (twelve 16-byte
@@ -153,18 +160,50 @@ __global__ void __launch_bounds__(kThreads, 2)
             cp_async<8>(&target.wscale[tid][0],
                         problem.scale_row(row_block, tid) + stage * kWeightGroupsPerStage);
         }
-        if (tid < StageTokens * 32) {
-            const int token = tid >> 5;
-            const int chunk = tid & 31;
+        // One 16-byte activation chunk per item. Eight rows fit one item per thread exactly, four
+        // rows use the lower half and the wide tile walks two; spelling the three shapes out keeps
+        // the narrow instantiations free of the branch a guard would add and of the speculative
+        // unrolling a runtime-bounded loop produces.
+        if constexpr (StageTokens * 32 == kThreads) {
+            const int item  = tid;
+            const int token = item >> 5;
+            const int chunk = item & 31;
             const int step  = chunk >> 2;
             const int part  = chunk & 3;
             const int line  = token * kStepsPerStage + step;
             const bool ok   = token < live;
             const std::int8_t* src =
-                qx + static_cast<std::int64_t>(ok ? token0 + token : token0) * k + stage * kStageK +
-                chunk * 16;
+                qx + static_cast<std::int64_t>(ok ? token : 0) * k + stage * kStageK + chunk * 16;
             cp_async_zfill<16>(&target.x[token][step * kStepK + swizzled_chunk(part, line)], src,
                                ok ? 16 : 0);
+        } else if constexpr (StageTokens * 32 < kThreads) {
+            if (tid < StageTokens * 32) {
+                const int item  = tid;
+                const int token = item >> 5;
+                const int chunk = item & 31;
+                const int step  = chunk >> 2;
+                const int part  = chunk & 3;
+                const int line  = token * kStepsPerStage + step;
+                const bool ok   = token < live;
+                const std::int8_t* src =
+                    qx + static_cast<std::int64_t>(ok ? token : 0) * k + stage * kStageK + chunk * 16;
+                cp_async_zfill<16>(&target.x[token][step * kStepK + swizzled_chunk(part, line)], src,
+                                   ok ? 16 : 0);
+            }
+        } else {
+#pragma unroll
+            for (int item = tid; item < StageTokens * 32; item += kThreads) {
+                const int token = item >> 5;
+                const int chunk = item & 31;
+                const int step  = chunk >> 2;
+                const int part  = chunk & 3;
+                const int line  = token * kStepsPerStage + step;
+                const bool ok   = token < live;
+                const std::int8_t* src =
+                    qx + static_cast<std::int64_t>(ok ? token : 0) * k + stage * kStageK + chunk * 16;
+                cp_async_zfill<16>(&target.x[token][step * kStepK + swizzled_chunk(part, line)], src,
+                                   ok ? 16 : 0);
+            }
         }
         if (tid < kActGroupsPerStage * StageTokens) {
             const int group = tid / StageTokens;
@@ -175,12 +214,12 @@ __global__ void __launch_bounds__(kThreads, 2)
             const float* src = x_scale +
                                static_cast<std::int64_t>(stage * kActGroupsPerStage + group) *
                                    tokens +
-                               token0 + (ok ? token : 0);
+                               (ok ? token : 0);
             cp_async_zfill<4>(&target.xscale[group][token], src, ok ? 4 : 0);
         }
         cp_commit();
     };
-    float acc[kM16Tiles][4] = {};
+    float acc[kTileHalves][kM16Tiles][4] = {};
 
     // Prologue: two stages fill the ring, so the loop always has the next stage complete and the
     // stage after it in flight.
@@ -212,17 +251,20 @@ __global__ void __launch_bounds__(kThreads, 2)
         }
 
         const Stage<StageTokens>& source = storage.work[buffer];
-        int g[kM16Tiles][4];
+        int g[kTileHalves][kM16Tiles][4];
 #pragma unroll
         for (int ks = 0; ks < 2; ++ks) {
-            unsigned b0, b1;
-            {
-                const int token = min(lane & 7, StageTokens - 1);
+            // One A fragment set per warp step serves every token half; only the B fragment of each
+            // eight-column half changes.
+            unsigned b[kTileHalves][2];
+#pragma unroll
+            for (int half = 0; half < kTileHalves; ++half) {
+                const int token = min((lane & 7) + kTokensPerB * half, StageTokens - 1);
                 const int line  = token * kStepsPerStage + warp;
                 const unsigned off = static_cast<unsigned>(line * kStepK) +
                                      swizzled_chunk(static_cast<unsigned>(2 * ks + ((lane >> 3) & 1)),
                                                     line);
-                ldmatrix_x2(b0, b1, smem_addr(&source.x[0][0]) + off);
+                ldmatrix_x2(b[half][0], b[half][1], smem_addr(&source.x[0][0]) + off);
             }
 #pragma unroll
             for (int mt = 0; mt < kM16Tiles; ++mt) {
@@ -235,21 +277,29 @@ __global__ void __launch_bounds__(kThreads, 2)
                 const unsigned a2         = q3_a8::spread4(field12(base0, bit_hi));
                 const unsigned a1         = q3_a8::spread4(field12(base1, bit_lo));
                 const unsigned a3         = q3_a8::spread4(field12(base1, bit_hi));
-                if (ks == 0) {
-                    mma_s8_from(g[mt][0], g[mt][1], g[mt][2], g[mt][3], a0, a1, a2, a3, b0, b1,
-                                kFloatMagic, kFloatMagic, kFloatMagic, kFloatMagic);
-                } else {
-                    mma_s8(g[mt][0], g[mt][1], g[mt][2], g[mt][3], a0, a1, a2, a3, b0, b1);
+#pragma unroll
+                for (int half = 0; half < kTileHalves; ++half) {
+                    if (ks == 0) {
+                        mma_s8_from(g[half][mt][0], g[half][mt][1], g[half][mt][2], g[half][mt][3], a0,
+                                    a1, a2, a3, b[half][0], b[half][1], kFloatMagic, kFloatMagic,
+                                    kFloatMagic, kFloatMagic);
+                    } else {
+                        mma_s8(g[half][mt][0], g[half][mt][1], g[half][mt][2], g[half][mt][3], a0, a1,
+                               a2, a3, b[half][0], b[half][1]);
+                    }
                 }
             }
         }
 
         // One FP32 product and one fused multiply-add per 64-code group, ascending in K within
         // the warp's own group sequence.
-        {
+        // One FP32 product and one fused multiply-add per 64-code group, ascending in K within
+        // the warp's own group sequence. Each eight-column half scales its own columns.
+#pragma unroll
+        for (int half = 0; half < kTileHalves; ++half) {
             const int group = warp;
-            const int tok0  = min(2 * lid, StageTokens - 1);
-            const int tok1  = min(2 * lid + 1, StageTokens - 1);
+            const int tok0  = min(kTokensPerB * half + 2 * lid, StageTokens - 1);
+            const int tok1  = min(kTokensPerB * half + 2 * lid + 1, StageTokens - 1);
             const float ts0 = source.xscale[group][tok0];
             const float ts1 = source.xscale[group][tok1];
 #pragma unroll
@@ -258,14 +308,14 @@ __global__ void __launch_bounds__(kThreads, 2)
                     __half2float(__ushort_as_half(source.wscale[mt * 16 + gid][group >> 1]));
                 const float rs1 =
                     __half2float(__ushort_as_half(source.wscale[mt * 16 + gid + 8][group >> 1]));
-                acc[mt][0] =
-                    fmaf(rs0 * ts0, __int_as_float(g[mt][0]) - kFloatMagicValue, acc[mt][0]);
-                acc[mt][1] =
-                    fmaf(rs0 * ts1, __int_as_float(g[mt][1]) - kFloatMagicValue, acc[mt][1]);
-                acc[mt][2] =
-                    fmaf(rs1 * ts0, __int_as_float(g[mt][2]) - kFloatMagicValue, acc[mt][2]);
-                acc[mt][3] =
-                    fmaf(rs1 * ts1, __int_as_float(g[mt][3]) - kFloatMagicValue, acc[mt][3]);
+                acc[half][mt][0] =
+                    fmaf(rs0 * ts0, __int_as_float(g[half][mt][0]) - kFloatMagicValue, acc[half][mt][0]);
+                acc[half][mt][1] =
+                    fmaf(rs0 * ts1, __int_as_float(g[half][mt][1]) - kFloatMagicValue, acc[half][mt][1]);
+                acc[half][mt][2] =
+                    fmaf(rs1 * ts0, __int_as_float(g[half][mt][2]) - kFloatMagicValue, acc[half][mt][2]);
+                acc[half][mt][3] =
+                    fmaf(rs1 * ts1, __int_as_float(g[half][mt][3]) - kFloatMagicValue, acc[half][mt][3]);
             }
         }
         // Leave the pipeline's in-flight window outstanding; the sync publishes the stages the
@@ -279,49 +329,54 @@ __global__ void __launch_bounds__(kThreads, 2)
     }
 
     // K-split reduction: odd warps publish, even warps fold their partner and republish, warp 0
-    // owns the final sum.
-    const auto store_partial = [&](int split) {
+    // owns the final sum. Each eight-column half reduces and emits independently.
 #pragma unroll
-        for (int t = 0; t < kM16Tiles; ++t) {
-            *reinterpret_cast<float4*>(&storage.partial[split][t][lane][0]) =
-                make_float4(acc[t][0], acc[t][1], acc[t][2], acc[t][3]);
-        }
-    };
-    if ((warp & 1) != 0) { store_partial(warp); }
-    __syncthreads();
-    if ((warp & 1) == 0) {
-#pragma unroll
-        for (int t = 0; t < kM16Tiles; ++t) {
-            const float4 partner =
-                *reinterpret_cast<const float4*>(&storage.partial[warp + 1][t][lane][0]);
-            acc[t][0] += partner.x;
-            acc[t][1] += partner.y;
-            acc[t][2] += partner.z;
-            acc[t][3] += partner.w;
-        }
-        if (warp != 0) { store_partial(warp); }
-    }
-    __syncthreads();
-    if (warp == 0) {
-#pragma unroll
-        for (int split = 2; split < kWarps; split += 2) {
+    for (int half = 0; half < kTileHalves; ++half) {
+        const auto store_partial = [&](int split) {
 #pragma unroll
             for (int t = 0; t < kM16Tiles; ++t) {
-                const float4 value =
-                    *reinterpret_cast<const float4*>(&storage.partial[split][t][lane][0]);
-                acc[t][0] += value.x;
-                acc[t][1] += value.y;
-                acc[t][2] += value.z;
-                acc[t][3] += value.w;
+                *reinterpret_cast<float4*>(&storage.partial[split][t][lane][0]) =
+                    make_float4(acc[half][t][0], acc[half][t][1], acc[half][t][2], acc[half][t][3]);
             }
+        };
+        if ((warp & 1) != 0) { store_partial(warp); }
+        __syncthreads();
+        if ((warp & 1) == 0) {
+#pragma unroll
+            for (int t = 0; t < kM16Tiles; ++t) {
+                const float4 partner =
+                    *reinterpret_cast<const float4*>(&storage.partial[warp + 1][t][lane][0]);
+                acc[half][t][0] += partner.x;
+                acc[half][t][1] += partner.y;
+                acc[half][t][2] += partner.z;
+                acc[half][t][3] += partner.w;
+            }
+            if (warp != 0) { store_partial(warp); }
         }
-        problem.emit(row_block, token0, lane, acc, tokens);
+        __syncthreads();
+        if (warp == 0) {
+#pragma unroll
+            for (int split = 2; split < kWarps; split += 2) {
+#pragma unroll
+                for (int t = 0; t < kM16Tiles; ++t) {
+                    const float4 value =
+                        *reinterpret_cast<const float4*>(&storage.partial[split][t][lane][0]);
+                    acc[half][t][0] += value.x;
+                    acc[half][t][1] += value.y;
+                    acc[half][t][2] += value.z;
+                    acc[half][t][3] += value.w;
+                }
+            }
+            problem.emit(row_block, kTokensPerB * half, lane, acc[half], tokens);
+        }
+        if (half + 1 < kTileHalves) { __syncthreads(); }
     }
 }
 
-// Launches one CTA per (row block, 8-column token tile) over an activation quantized by
-// rowsplit_a8_quantize for this `k` and `tokens` (1..16), token tile fastest. The weight must have
-// k == padded_k and a whole number of 512-code stages.
+// Launches one CTA per row block over an activation quantized by rowsplit_a8_quantize for this `k`
+// and `tokens` (1..16): the narrow tile owns 1..8 columns and the wide tile 9..16, so every code
+// byte of a row block is loaded once. The weight must have k == padded_k and a whole number of
+// 512-code stages.
 template <class Problem>
 void launch(const Problem& problem, std::int32_t row_blocks, const std::int8_t* qx,
             const float* x_scale, std::int32_t k, std::int32_t tokens, cudaStream_t stream) {
@@ -331,14 +386,18 @@ void launch(const Problem& problem, std::int32_t row_blocks, const std::int8_t* 
     if (k <= 0 || (k % kStageK) != 0) {
         throw std::invalid_argument("q3 small-T A8 MMA: K is not a whole number of stages");
     }
-    const std::int32_t token_tiles = (tokens + kTokens - 1) / kTokens;
-    const unsigned grid = static_cast<unsigned>(row_blocks) * static_cast<unsigned>(token_tiles);
-    if (tokens <= 4) {
-        q3_small_t_a8_mma_kernel<Problem, 4><<<grid, kThreads, 0, stream>>>(qx, x_scale, problem, k,
-                                                                            tokens, token_tiles);
+    const unsigned grid = static_cast<unsigned>(row_blocks);
+    if (tokens <= kTokens) {
+        if (tokens <= 4) {
+            q3_small_t_a8_mma_kernel<Problem, kTokens, 4><<<grid, kThreads, 0, stream>>>(
+                qx, x_scale, problem, k, tokens);
+        } else {
+            q3_small_t_a8_mma_kernel<Problem, kTokens, kTokens><<<grid, kThreads, 0, stream>>>(
+                qx, x_scale, problem, k, tokens);
+        }
     } else {
-        q3_small_t_a8_mma_kernel<Problem, 8><<<grid, kThreads, 0, stream>>>(qx, x_scale, problem, k,
-                                                                            tokens, token_tiles);
+        q3_small_t_a8_mma_kernel<Problem, kWideTokens, kWideTokens><<<grid, kThreads, 0, stream>>>(
+            qx, x_scale, problem, k, tokens);
     }
     CUDA_CHECK(cudaGetLastError());
 }
