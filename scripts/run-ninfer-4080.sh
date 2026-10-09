@@ -7,7 +7,7 @@
 # 100K profile:
 #
 #   * 102,400-token context, one lane, rk4v4-e8 KV (the registered 4080 fit)
-#   * MTP speculative decoding, three draft tokens, LM-head draft route
+#   * MTP speculative decoding, three draft tokens, LM-head draft route, n-gram chain
 #   * vision tower enabled (the GSQ3 artifact carries it)
 #   * server sampling defaults temperature 1, top-k 20, top-p 0.95, min-p 0,
 #     presence/frequency penalties 0. This engine has no multiplicative repeat
@@ -25,11 +25,12 @@
 # that image instead of serving the previous build; published images have no label and are
 # served as pulled.
 #
-# Measured on this card with the session-26 build (docs/maintainer/rtx-4080-plan.md section 11;
-# tiled corpus, rk4v4-e8, --prefill-chunk 1024, one repetition per point): prefill about
-# 2720/2425/2126/1895 tok/s and MTP3 decode about 151/142/131/122 tok/s at 8K/32K/64K/98K depth;
-# DFlash2 K=7 decodes about 167/262/239/213 tok/s at the same points. At the documented 100K
-# profile (--prefill-chunk 2688) prefill is about 1971 tok/s. The profile is fixed; edit this
+# Measured on this card (docs/maintainer/rtx-4080-plan.md section 11; tiled corpus, rk4v4-e8,
+# --prefill-chunk 1024, one repetition per point): prefill about 2754/2460/2152/1917 tok/s and
+# MTP3 decode about 361/385/332/303 tok/s at 8K/32K/64K/98K depth; the n-gram chain is what moves
+# this repeated corpus (about 151/142/131/122 without it), while a one-shot code answer is
+# unchanged. DFlash2 K=7 decodes about 168/265/241/213 tok/s at the same points. At the documented
+# 100K profile (--prefill-chunk 2688) prefill is about 1971 tok/s. The profile is fixed; edit this
 # file to change it.
 #
 # The published port binds every host interface, so the profile is reachable from
@@ -129,7 +130,7 @@ exec docker run --rm \
     --max-context 102400 --kv-capacity 102400 --kv-dtype "$kv_dtype" \
     --max-concurrency 1 --max-pending-requests 16 --prefill-chunk 2688 \
     --host-kv-mib 4096 \
-    --spec mtp --draft-tokens 3 --lm-head-draft \
+    --spec mtp --draft-tokens 3 --lm-head-draft --ngram chain \
     --vision --preserve-thinking \
     --temperature 1 --top-k 20 --top-p 0.95 --min-p 0 \
     --presence-penalty 0 --frequency-penalty 0 \

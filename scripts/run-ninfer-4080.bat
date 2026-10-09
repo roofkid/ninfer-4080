@@ -6,7 +6,7 @@ rem  Pulls the published image and serves the registered 3-bit GSQ artifact
 rem  with the documented 100K profile:
 rem
 rem    * 102,400-token context, one lane, rk4v4-e8 KV (the registered 4080 fit)
-rem    * MTP speculative decoding, three draft tokens, LM-head draft route
+rem    * MTP speculative decoding, three draft tokens, LM-head draft route, n-gram chain
 rem    * vision tower enabled (the GSQ3 artifact carries it)
 rem    * server sampling defaults temperature 1, top-k 20, top-p 0.95, min-p 0,
 rem      presence/frequency penalties 0. This engine has no multiplicative
@@ -25,13 +25,15 @@ rem  org.ninfer.revision), so pulling source changes and re-running this launche
 rem  rebuilds that image instead of serving the previous build; published images
 rem  have no label and are served as pulled.
 rem
-rem  Measured on this card with the session-26 build
+rem  Measured on this card
 rem  (docs\maintainer\rtx-4080-plan.md section 11; tiled corpus, rk4v4-e8,
 rem  --prefill-chunk 1024, one repetition per point): prefill about
-rem  2720/2425/2126/1895 tok/s and MTP3 decode about 151/142/131/122 tok/s at
-rem  8K/32K/64K/98K depth; DFlash2 K=7 decodes about 167/262/239/213 tok/s at the
-rem  same points. At the documented 100K profile (--prefill-chunk 2688) prefill
-rem  is about 1971 tok/s. The profile is fixed; edit this file to change it.
+rem  2754/2460/2152/1917 tok/s and MTP3 decode about 361/385/332/303 tok/s at
+rem  8K/32K/64K/98K depth; the n-gram chain is what moves this repeated corpus
+rem  (about 151/142/131/122 without it), while a one-shot code answer is
+rem  unchanged. DFlash2 K=7 decodes about 168/265/241/213 tok/s at the same
+rem  points. At the documented 100K profile (--prefill-chunk 2688) prefill is
+rem  about 1971 tok/s. The profile is fixed; edit this file to change it.
 rem
 rem  The published port binds every host interface, so the profile is reachable
 rem  from other machines on the network at http://<host-ip>:8080/v1 ^(allow the
@@ -147,7 +149,7 @@ docker run --rm ^
   --max-context 102400 --kv-capacity 102400 --kv-dtype %NINFER_KV_DTYPE% ^
   --max-concurrency 1 --max-pending-requests 16 --prefill-chunk 2688 ^
   --host-kv-mib 4096 ^
-  --spec mtp --draft-tokens 3 --lm-head-draft ^
+  --spec mtp --draft-tokens 3 --lm-head-draft --ngram chain ^
   --vision --preserve-thinking ^
   --temperature 1 --top-k 20 --top-p 0.95 --min-p 0 ^
   --presence-penalty 0 --frequency-penalty 0 ^

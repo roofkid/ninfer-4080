@@ -103,7 +103,7 @@ docker run --rm --gpus all -p 8080:8080 \
   --max-context 102400 --kv-capacity 102400 --kv-dtype rk4v4-e8 \
   --max-concurrency 1 --max-pending-requests 16 --prefill-chunk 2688 \
   --host-kv-mib 4096 \
-  --spec mtp --draft-tokens 3 --lm-head-draft \
+  --spec mtp --draft-tokens 3 --lm-head-draft --ngram chain \
   --vision --preserve-thinking
 ```
 
