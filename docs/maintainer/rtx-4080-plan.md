@@ -129,6 +129,15 @@ profiles. Published 2026-10-03: the Hugging Face repository `roofkid/Qwen3.8-27B
 (main `2359d374`) carries the artifact, and the Docker Hub image `roofkid/ninfer-4080:gsq3` is
 pushed; `ghcr.io` is deferred.
 
+**Session 28 (2026-10-09) landed session-21 item (c), the native T=9..16 small-T tile.** The
+9..16-column verify windows (DFlash2 K=15, wide n-gram) now run one 16-column CTA per row block in
+both the A16 and the A8 small-T engines, so every code byte is staged once; the 8-column route is
+untouched. Same-binaries A/B on `34816x5120`, clean flush: A8 T=9..11 0.65x and T=12..16 0.69x,
+A16 T=9..16 0.68-0.69x, T=2..8 at parity. The engine DFlash2 K=15 code scenario drops 465 -> 372 ms
+(88.2 -> 110.2 tok/s, +25%) with the greedy output hash unchanged, K=7 and MTP3 are at parity, the
+real DFlash2 and n-gram routes pass, and full `ctest` is 133/120/13/0. §11 has the design and the
+codegen finding that kept the narrow kernels from regressing.
+
 Environment for this plan: the `Dockerfile.dev` image in this repository. It is the sandbox the
 maintainer hands to pi, with the host RTX 4080 passed through:
 
@@ -828,7 +837,9 @@ DFlash2 on the 4080; multi-lane and preemption; the 5090 tree; Windows.
    kernel: the prompt attention worker V-dequant schedule takes the append bench 32-35% down at
    8K-128K and the engine same-session A/B to `pp32768` 2470 and `pp100000` 1971 tok/s, with the
    real n-gram/DFlash2 routes unchanged. No prefill item from the session-13 audit remains; the
-   open decode item is the native T=9..16 single-pass tile (session 21 item c).
+   Session 28 (§11) then landed the last open decode item, the native T=9..16 small-T tile
+   (session 21 item c): DFlash2 K=15 went 88.2 -> 110.2 tok/s at the same output hash, no narrow
+   route regressed, and the session-21 next-step list is closed.
 
 ## 11. Stage log
 
@@ -2336,7 +2347,8 @@ grid384 3.44 + A16 grid128 1.35 + quantize 0.4 = **25.6 ms** of a 30.5 ms round.
 **Next.** (a) the Q4 main-head single-pass at T=8 (extend the Q4 small-T geometry to n=248320; the
 session-21 ranking's item 3) — **landed session 22**; (b) split the in-kernel consume with one more
 probe (x staging vs MMA) and try a warp-specialized/leaner consume — **landed session 25**
-(direct-register A fragments, §11); (c) the T=9..16 single-pass tile for K=15 — still open.
+(direct-register A fragments, §11); (c) the T=9..16 single-pass tile for K=15 — **landed session 28**
+(§11).
 
 ### Occupancy/wave-tail experiment: rejected (2026-10-02, session 22)
 
@@ -2454,9 +2466,10 @@ Evidence (RTX 4080, `out/qwen3_8_27b_gsq3.ninfer`; logs under `profiles/bench/5c
   accepted=20/20; the n-gram real route passes with 80 wide rounds and 0 added divergences;
   `git diff --check` clean.
 
-Session-21 item (b) is closed. Item (c) remains: the direct-A route does not remove the double-tile
-cost at T=9..16 (203.8 us against 118.8 at T=8), so DFlash2 K=15 and wide n-gram windows still want
-the native single-pass 16-column tile. Bench tooling now takes `--flush read|memset`; use
+Session-21 item (b) is closed. Item (c) wanted the native single-pass 16-column tile for the
+double-tile cost at T=9..16 (203.8 us against 118.8 at T=8); **session 28 (§11) landed it** at
+140.3/139.3 us (A8/A16-class op numbers are in the session-28 record). Bench tooling now takes
+`--flush read|memset`; use
 `--flush read` for streaming claims.
 
 ### Prompt attention worker V-dequant: 5c.4 landed (2026-10-03, session 26)
@@ -2517,5 +2530,54 @@ restructure leaves the recorded real-route outputs unchanged. `ninfer-perplexity
 (`--kv-dtype int8`) reports 4.596095 overall with the same per-domain numbers as the session-9
 anchor, so the weight-quality gate is untouched.
 
-**Residual.** No prefill item from the session-13 audit remains. The one open decode item is still
-session-21 item (c): the native T=9..16 single-pass tile for K=15 / wide n-gram windows.
+**Residual.** No prefill item from the session-13 audit remains. The one open decode item was
+session-21 item (c), the native T=9..16 single-pass tile for K=15 / wide n-gram windows; **session
+28 (§11) landed it**.
+
+### Native T=9..16 single-pass small-T tile (2026-10-09, session 28; session-21 item c)
+
+**Deliverable.** The 9..16-column verify windows (DFlash2 K=15, wide n-gram) ran two 8-column
+small-T CTAs per row block, so each code byte was staged twice and the weight stream doubled. Both
+small-T engines now own the window in one CTA.
+
+**Design.** `q3_small_t_mma_kernel` and `q3_small_t_a8_mma_kernel` take `TileTokens` (8 or 16) and
+`StageTokens` (4, 8 or 16); one CTA owns one row block and one tile, so 9..16 columns launch one CTA
+per row block (`launch_q3_mma_small_t_r32_c16` / `..._a8_r32_c16` and the two folded-SwiGLU c16
+wrappers; the 8-column wrappers now assert their 1..8 domain). The B fragment is loaded per
+8-column half and the A fragment pair is reused, so only the activation traffic grows with the tile.
+The A16 kernel's 16-row activation makes its ring one shallower (two buffers, 39,168 B) to keep the
+full 32x256 decoded tile inside the 48 KiB static shared limit at two CTAs/SM; the A8 kernel keeps
+its three-buffer ring (45,312 B, two CTAs/SM). Padded-K shapes that already took the small-T route
+take the wide tile at 9..16 too.
+
+**Codegen finding.** Expressing the activation staging as one runtime-bounded loop (`for (item =
+tid; item < StageTokens*32; item += kThreads)`) made nvcc speculate on out-of-range iterations
+(tid+256, tid+512) and branch around each staging copy; that cost the *narrow* A16 kernels 2-11%
+(T=5..8 172 -> 191 us) with no semantic change. Spelling the three shapes out - 8 rows take exactly
+one item per thread with no guard, 4 rows guard the lower half, 16 rows walk two - restores the
+baseline codegen (T=8 170 us against the pre-change binary's 171 us). The session-20 estimate of
+"~135 us saved per double-tile call" was optimistic: the wide tile lands at 140 us against 204 at
+T=16, i.e. ~64 us per call, because the activation stream is re-read by every row block and doubles
+with the tile width (the A8 path reads it as int8, hence T=9..11 at 132 us).
+
+**Evidence** (RTX 4080, `out/qwen3_8_27b_gsq3.ninfer`; the pre-change binary is kept as the A/B
+control, and CSVs/logs are under `profiles/bench/5c-c16/`):
+
+- `ninfer_linear_bench --qtype Q3 --policy a8|a16 --n 34816 --k 5120 --sweep 2:17:1 --warmup 3
+  --repeat 10 --flush read`, baseline and after runs back to back in one clock window: A8 T=2..8
+  0.98-1.00x, T=9..11 0.65x, T=12..16 0.69x; A16 T=2..4 0.99x, T=5..8 0.99-1.00x, T=9..16 0.68-0.69x.
+- `test_q3_a16_small_t` and `test_q3_a8_small_t` pin the 16-column tile at T=9..16 and keep the
+  FP64 / documented-quantization oracle coverage; each suite now also byte-compares the wide tile's
+  first eight columns against the 8-column route (same codes and the same per-column MMA sequence,
+  so a schedule change must be exactly equal). All nine Q3 suites pass.
+- Engine, `scenario_code_python.json`, greedy, `rk4v4-e8`, same-binaries A/B: DFlash2 K=15 465 ->
+  372 ms, 88.2 -> 110.2 tok/s (+25%), output hash `54c59149db5f` and 4.20 tok/round unchanged;
+  DFlash2 K=7 300 -> 299 ms; MTP3 358 -> 360 ms (same rounds, acceptance and hash; within the
+  scenario's ~1% run-to-run wobble, while the op-level T=4 points measure equal-or-faster).
+- `ninfer_qwen3_8_27b_dflash2_real_test 15 1 1 1` ok (accepted=20/35) and `7 1 1 1` ok (20/20);
+  `ninfer_qwen3_6_27b_ngram_real_test` on this artifact with `rk4v4-e8` reports 60 wide rounds of
+  645 and `ngram lossless: PASS` (its usual quantized-KV report; the bf16 fixture is not present in
+  this container).
+- Full `ctest` 133/120/13/0 twice; `git diff --check` clean.
+
+Session-21 item (c) is closed, and with it the session-21 next-step list.
