@@ -118,17 +118,18 @@ Without Docker, the CLI is:
 
 ## Performance at 100K on the RTX 4080
 
-Measured with `ninfer_bench` on the session-26 build (`rtx4080-port` tip), `rk4v4-e8`,
+Measured with `ninfer_bench` on the current `rtx4080-port` build, `rk4v4-e8`,
 `--prefill-chunk 1024`, the fork's 131,072-token tiled corpus, one warmup and one measured
 repetition per point. Acceptance is a tiled-corpus fixture property (repeated text), not a
-model result.
+model result; the MTP3 column is the default profile including the n-gram chain, which the
+repeated corpus amplifies, and `--ngram off` is its control.
 
-| Depth | Prefill t/s | MTP3 decode t/s | DFlash2 K=7 decode t/s |
-|---:|---:|---:|---:|
-| 8K | 2,719.9 | 151.2 | 166.7 |
-| 32K | 2,424.9 | 141.7 | 262.3 |
-| 64K | 2,125.5 | 130.7 | 239.1 |
-| 98K | 1,895.1 | 122.3 | 212.7 |
+| Depth | Prefill t/s | MTP3 decode t/s | MTP3 `--ngram off` t/s | DFlash2 K=7 decode t/s |
+|---:|---:|---:|---:|---:|
+| 8K | 2,754.2 | 361.8 | 150.5 | 167.6 |
+| 32K | 2,460.0 | 385.1 | 141.7 | 264.4 |
+| 64K | 2,152.0 | 332.8 | 130.3 | 241.3 |
+| 98K | 1,917.2 | 302.9 | 122.2 | 213.2 |
 
 At the documented 100K prefill profile (`--prefill-chunk 2688`) the same build measures
 **1,971.4 tok/s**, and 2,470.0 tok/s at 32,768 tokens. MTP3 and DFlash2 accept 3 and 7 draft
@@ -139,7 +140,8 @@ in the fork's real-artifact tests, and the MTP3 route is covered by the same sui
 
 - **100K + vision + MTP3** (`--max-context 102400`, `--host-kv-mib 4096`, `rk4v4-e8`): about
   11 GiB of device weights, KV plus runtime reservation validated before the server starts
-  listening, with roughly 0.9 GiB of headroom after startup.
+  listening, with roughly 0.8 GiB of headroom after startup. The n-gram chain is on by default
+  for MTP3 (`--ngram off` disables it).
 - **DFlash2 K=7**: validated at 100,000 tokens text-only and 65,536 tokens with vision at the
   same safety margin.
 - The pinned host pools (`--host-kv-mib 4096`, default host state slots) hold a deep 100K

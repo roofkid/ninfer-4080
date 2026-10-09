@@ -5,7 +5,7 @@
 NInfer-4080 runs the
 [ISTA-DASLab Qwen3.8-27B 3-bit GSQ](https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-3Bit-GSQ)
 checkpoint on one NVIDIA GeForce RTX 4080 using more of the hardware than the general-purpose
-engines do: up to **2,720 tok/s prefill** and **262 tok/s generation** are measured on this card
+engines do: up to **2,754 tok/s prefill** and **385 tok/s generation** are measured on this card
 (sweep below), with the full **100,000-token context, vision, and MTP3/DFlash2 speculative
 decoding** profiles resident at once. The artifact and a binaries-only container image are
 published, so there is nothing to convert before you run it.
@@ -22,7 +22,7 @@ documented in [docs/](docs/).
 ## TL;DR
 
 - Runs ISTA-DASLab's 3-bit GSQ Qwen3.8-27B at 100K context on one RTX 4080 16 GB.
-- Up to 2,720 tok/s prefill and 262 tok/s generation, measured on the card.
+- Up to 2,754 tok/s prefill and 385 tok/s generation, measured on the card.
 - 3.125 bpw Text body repacked verbatim from the publisher; Q4 vocabulary endpoints; DFlash2
   companion requantized to Q4 and enabled.
 - Artifact: [roofkid/Qwen3.8-27B-GSQ3-NInfer](https://huggingface.co/roofkid/Qwen3.8-27B-GSQ3-NInfer)
@@ -83,14 +83,15 @@ then `cmake --build build --parallel`) and run `./build/apps/ninfer models/qwen3
 
 Conditions: single request, `rk4v4-e8` KV, `--prefill-chunk 1024`, the 131,072-token tiled corpus,
 one warmup and one measured repetition per point. Acceptance is a tiled-corpus fixture property
-(repeated text), not a model result.
+(repeated text), not a model result; the MTP3 column is the default profile including the n-gram
+chain, which the repeated corpus amplifies, and `--ngram off` is its control.
 
-| Depth | Prefill t/s | MTP3 decode t/s | DFlash2 K=7 decode t/s |
-|---:|---:|---:|---:|
-| 8K | 2,719.9 | 151.2 | 166.7 |
-| 32K | 2,424.9 | 141.7 | 262.3 |
-| 64K | 2,125.5 | 130.7 | 239.1 |
-| 98K | 1,895.1 | 122.3 | 212.7 |
+| Depth | Prefill t/s | MTP3 decode t/s | MTP3 `--ngram off` t/s | DFlash2 K=7 decode t/s |
+|---:|---:|---:|---:|---:|
+| 8K | 2,754.2 | 361.8 | 150.5 | 167.6 |
+| 32K | 2,460.0 | 385.1 | 141.7 | 264.4 |
+| 64K | 2,152.0 | 332.8 | 130.3 | 241.3 |
+| 98K | 1,917.2 | 302.9 | 122.2 | 213.2 |
 
 At the documented 100K prefill profile (`--prefill-chunk 2688`) the same build measures
 **1,971.4 tok/s**, and 2,470.0 tok/s at 32,768 tokens. Against the llama.cpp IQ3_S reference on
@@ -104,7 +105,8 @@ the port is active; the same numbers are repeated in the model card.
 
 - **100K + vision + MTP3** (`--max-context 102400`, `--host-kv-mib 4096`, `rk4v4-e8`): about
   11.2 GiB of device weights; the KV and runtime reservation validate before the server listens,
-  leaving roughly 0.9 GiB free.
+  leaving roughly 0.8 GiB free. The n-gram chain is on by default for MTP3 (`--ngram off` disables
+  it).
 - **DFlash2 K=7**: validated at 100,000 tokens text-only and 65,536 tokens with vision at the same
   safety margin (`--spec dflash2 --draft-tokens 7 --lm-head-draft`).
 - KV modes: `rk4v4-e8` is the 100K accuracy profile. `int8` and `rk8v4` trade context for
