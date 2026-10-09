@@ -2543,6 +2543,44 @@ anchor, so the weight-quality gate is untouched.
 session-21 item (c), the native T=9..16 single-pass tile for K=15 / wide n-gram windows; **session
 28 (§11) landed it**.
 
+**Byteshape allocation transplant (2026-10-09, exploratory; no plan stage).** The published
+`byteshape/Qwen3.8-27B-GGUF` `Qwen3.8-27B-IQ3_S-3.23bpw.gguf` was used as an allocation prior
+only: `inventory_byteshape.py` maps its per-tensor GGML types (IQ3_XXS and IQ2_XXS to Q3G128,
+IQ4_XS to Q4G64, Q5_K to Q5G64, Q6_K to Q6G64) through the shared fused-object route resolution,
+and `convert_byteshape.py` quantizes every text-core matrix once from the official BF16
+checkpoint with the shared clipping-search encoder; Vision, MTP, the draft head and the Q4
+DFlash2 companion are the registered first-generation objects. New identity
+`qwen3.8-27b/byteshape-iq3s` with `WeightsProfile::Qwen38ByteshapeIq3s` (shares the gsqrco
+binder, Q4 endpoints and Q4 companion), plus `verify_byteshape.py` and
+`tests/convert/qwen3_8_27b/test_byteshape_convert.py`.
+
+- `out/qwen3_8_27b_byteshape_iq3s.ninfer`: 13,741,441,536 B; ported mix 271 Q3G128 / 23 Q4G64 /
+  28 Q5G64; conversion 437 s; allocation digest `86875f2fd2c0de4e…` in the report.
+- Quick PPL (int8 KV, same corpus and harness): **4.810153** against GSQ3 4.596095 (+4.65%) and
+  the RCO port 4.685275 (+2.7%); per domain chinese 5.833, english-long 7.696, english-reference
+- **Same-file check** (`wikitext/00.txt`, 65,304 scored tokens, context 4096 / stride 2048, bf16 KV;
+  llama.cpp on the same file with default KV and 15 context chunks): GSQ3 **6.3968**, RCO port
+  **6.4560**, byteshape mix **6.6706**, uniform control **7.0755**; llama.cpp GSQ-RCO GGUF
+  **6.2188**, llama.cpp byteshape GGUF **6.5740**. Within each harness the ordering is the same:
+  the first-generation byteshape transplant lands next to its source GGUF (6.67 vs 6.57) and
+  behind both ISTA artifacts; the RCO file is natively better than byteshape at 3.50 vs 3.23 bpw.
+  The quick-corpus 4.81 is not comparable to a wikitext-only number (four streams, code domain
+  1.77).
+  6.670, code 1.774.
+- **Encoder control** (`--uniform-body`: the GSQ3 allocation at 13,330,776,576 B, same encoder)
+  scores **5.092467**. At identical allocation and size the publisher's GSQ codes beat the local
+  clipping-search encoder by 0.496 PPL (10.8%), while the byteshape mix itself buys 0.282 PPL
+  (5.5%) over uniform Q3 for +0.41 GB. The gap is encoder quality, not allocation — the standing
+  "GSQ-quality re-quantization" finding, now measured first-generation.
+- `verify_byteshape` passes over all 1184 tensors (direct formats exact, resource payloads equal
+  to source; worst relative L2: Q3 0.2239, Q4 0.1469, Q5 0.0650, Q6 0.0247, W8 0.0084); report
+  `profiles/perplexity/byteshape-verify.json`. The gsq3 and gsqrco identities still load under the
+  new profile table.
+- Result: the transplant loads, scores and is coherent, but it does not beat the existing GSQ3
+  artifact, and no further allocation transplant is warranted before an encoder improvement. The
+  uniform control is `out/qwen3_8_27b_byteshape_q3_control.ninfer`; both identities remain local
+  to this tree.
+
 ### Native T=9..16 single-pass small-T tile (2026-10-09, session 28; session-21 item c)
 
 **Deliverable.** The 9..16-column verify windows (DFlash2 K=15, wide n-gram) ran two 8-column
