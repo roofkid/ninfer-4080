@@ -2668,3 +2668,11 @@ matches MTP3's while K=7 takes a different valid branch (the unspecified `tags` 
 session-15 trajectory class. On the one-shot code scenario DFlash2 K=7 stays ahead (136.5 vs
 113.8) and K=15 is behind (109.8). The chain's value is closing part of the structured gap with no
 extra weight memory and no context penalty.
+
+**Launcher pin.** The pull-first 4080 launchers (`scripts/run-ninfer-4080.{sh,bat}`) and the
+documented container invocations in `README.md` and the model card pass `--ngram chain` explicitly:
+the published image predates the default and is served as pulled (no `org.ninfer.revision` label, so
+the launcher never rebuilds it), while the flag is valid on both the published and the current
+binary. The DFlash2 launchers stay untouched because the chain is MTP-only and the published
+binary rejects the flag with `--spec dflash2`. The launcher headers now carry the session-29 depth
+sweep instead of the pre-chain numbers.
