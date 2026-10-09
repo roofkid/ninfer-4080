@@ -87,7 +87,7 @@ std::string usage_text(const char* argv0) {
            "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8]\n"
            "       [--spec mtp|dflash|dflash2 --draft-tokens N]\n"
            "       [--lm-head-draft]\n"
-           "       [--ngram chain [--ngram-max V] [--ngram-n N] [--ngram-min N]\n"
+           "       [--ngram off|chain [--ngram-max V] [--ngram-n N] [--ngram-min N]\n"
            "        [--ngram-pool-mib M]]\n"
            "       [--temperature F] [--top-p F] [--top-k N] [--min-p F]\n"
            "       [--presence-penalty F] [--frequency-penalty F] [--seed N] [--greedy]\n"
@@ -229,6 +229,7 @@ Options parse_options(int argc, char** argv) {
         options.kv_capacity.explicit_tokens < options.max_context) {
         throw std::invalid_argument("--kv-capacity must be at least --max-context");
     }
+    product::normalize_speculative_options(options.speculative);
     product::validate_speculative_cli_options(options.speculative);
     if (!options.enable_thinking && options.reasoning_effort) {
         throw std::invalid_argument("--reasoning-effort cannot be combined with --no-thinking");

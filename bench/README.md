@@ -82,7 +82,8 @@ For a DFlash2 companion artifact:
 ```
 
 The benchmark disables context retention because every repetition is an independent root request.
-Schema v14 records `speculative_backend`, `draft_tokens`, and the proposal head independently;
+Schema v15 records `speculative_backend`, `draft_tokens`, the proposal head, and the n-gram mode
+independently;
 JSON and CSV identify DFlash2 explicitly. MTP alone reserves its extra lookahead KV margin.
 
 ## Context-cost calibration
@@ -1099,7 +1100,7 @@ closed.
 
 Table, JSON, and CSV reports all identify the selected target, artifact, Engine configuration,
 load summary, memory capacity, KV payload, workspace peak, phase throughput, and speculative
-statistics. JSON schema version 13 records the public value objects directly:
+statistics. JSON schema version 15 records the public value objects directly:
 
 - `load`: target, `weights_id`, load/upload time, file/H2D/staging bytes, tensor count, and resource
   count;

@@ -831,7 +831,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
-| `--ngram chain` | extend MTP proposals with host n-gram drafts; requires `--spec mtp` (see [cli.md](cli.md#speculative-decoding)) | off |
+| `--ngram off\|chain` | extend MTP proposals with host n-gram drafts, MTP only (see [cli.md](cli.md#speculative-decoding)) | `chain` |
 | `--ngram-max V` | n-gram chain bound, `draft-tokens + 3 .. 15` | `15` |
 | `--ngram-n N` | n-gram lookup key length, `1..64` | `8` |
 | `--ngram-min N` | drop pool extensions shorter than N | `1` |

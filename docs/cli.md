@@ -170,7 +170,8 @@ may be combined with `--vision`.
   --lm-head-draft
 ```
 
-With MTP, `--ngram chain` extends each round's MTP proposal with host n-gram drafts in the style
+With MTP, the n-gram chain is on by default and `--ngram off` disables it; other speculative
+backends ignore it. The chain extends each round's MTP proposal with host n-gram drafts in the style
 of llama.cpp `ngram-mod`: a shared pool maps the hash of the last `--ngram-n` tokens (default 8) to
 the token that last followed them, and the proposal continues from it for up to `--ngram-max`
 drafts in total (default 15, range `draft-tokens + 3 .. 15`). Extensions shorter than
@@ -224,7 +225,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
-| `--ngram chain` | extend MTP proposals with host n-gram drafts; requires `--spec mtp` | off |
+| `--ngram off\|chain` | extend MTP proposals with host n-gram drafts (MTP only) | `chain` |
 | `--ngram-max V` | n-gram verify window, `draft-tokens + 3 .. 15` | `15` |
 | `--ngram-n N` | n-gram lookup key length, `1..64` | `8` |
 | `--ngram-min N` | drop pool extensions shorter than N | `1` |

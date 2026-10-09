@@ -80,6 +80,15 @@ inline void apply_ngram_cli_option(std::string_view flag, std::string_view value
     }
 }
 
+// The n-gram chain extends the MTP proposal, so it is on by default for `--spec mtp` and has no
+// effect elsewhere. Every other backend clears it here, before validation, so the engine plan,
+// request logs and metrics all report the effective mode.
+inline void normalize_speculative_options(SpeculativeOptions& options) {
+    if (options.backend != SpeculativeBackend::Mtp) {
+        options.ngram = NgramOptions{.mode = NgramDraftMode::Off};
+    }
+}
+
 inline void validate_ngram_cli_options(const SpeculativeOptions& options) {
     const NgramOptions& ngram = options.ngram;
     if (ngram.mode == NgramDraftMode::Off) {
@@ -92,7 +101,8 @@ inline void validate_ngram_cli_options(const SpeculativeOptions& options) {
         return;
     }
     if (options.backend != SpeculativeBackend::Mtp) {
-        throw std::invalid_argument("--ngram chain requires --spec mtp");
+        // normalize_speculative_options clears non-MTP n-gram options before validation.
+        return;
     }
     if (ngram.max_drafts < options.draft_tokens + 3 || ngram.max_drafts > 15) {
         throw std::invalid_argument("--ngram-max must be in [--draft-tokens + 3, 15]");

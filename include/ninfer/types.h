@@ -78,7 +78,8 @@ enum class SpeculativeBackend : std::uint8_t {
     DFlash,
     DFlash2,
 };
-// Host n-gram drafts (llama.cpp ngram-mod style) chained after the MTP proposal.
+// Host n-gram drafts (llama.cpp ngram-mod style) chained after the MTP proposal. The chain is
+// enabled by default for the MTP backend; every other speculative backend ignores it.
 enum class NgramDraftMode : std::uint8_t {
     Off,
     // Each row verifies the MTP proposal followed by the pool's continuation of it.
@@ -86,7 +87,7 @@ enum class NgramDraftMode : std::uint8_t {
 };
 
 struct NgramOptions {
-    NgramDraftMode mode = NgramDraftMode::Off;
+    NgramDraftMode mode = NgramDraftMode::Chain;
     // Verify window V: drafts per round, MTP proposal plus pool extension, in
     // [draft_tokens + 3, 15]. A round uses V only when some row's draft reaches draft_tokens + 3.
     std::uint32_t max_drafts = 15;

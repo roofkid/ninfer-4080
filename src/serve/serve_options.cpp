@@ -87,7 +87,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8] "
            "[--spec mtp|dflash|dflash2 --draft-tokens N] "
-           "[--ngram chain [--ngram-max V] [--ngram-n N] [--ngram-min N] [--ngram-pool-mib M]] "
+           "[--ngram off|chain [--ngram-max V] [--ngram-n N] [--ngram-min N] [--ngram-pool-mib M]] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--vision-max-tokens N] [--no-cuda-graph] [--no-prefix-reuse] "
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] [--cors] "
@@ -415,6 +415,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     if (options.prefill_chunk == 0 || options.prefill_chunk % 128 != 0) {
         throw std::invalid_argument("--prefill-chunk must be a positive multiple of 128");
     }
+    product::normalize_speculative_options(options.speculative);
     product::validate_speculative_cli_options(options.speculative);
     if (default_max_tokens_explicit) {
         if (options.default_max_tokens <= 0) {

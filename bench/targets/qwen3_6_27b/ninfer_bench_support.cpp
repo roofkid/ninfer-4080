@@ -179,6 +179,10 @@ SpeculativeStats aggregate_speculative(const TestResult& result) {
         out.drafted_tokens += in.drafted_tokens;
         out.accepted_tokens += in.accepted_tokens;
         out.fallback_steps += in.fallback_steps;
+        out.verify_window = std::max(out.verify_window, in.verify_window);
+        out.wide_rounds += in.wide_rounds;
+        out.ngram_drafted_tokens += in.ngram_drafted_tokens;
+        out.ngram_accepted_tokens += in.ngram_accepted_tokens;
         if (out.accepted_per_position.size() < in.accepted_per_position.size()) {
             out.accepted_per_position.resize(in.accepted_per_position.size());
         }
@@ -256,7 +260,12 @@ void append_speculative_json(std::ostringstream& out, const SpeculativeStats& st
         if (i != 0) { out << ", "; }
         out << stats.accepted_per_position[i];
     }
-    out << "]\n" << indent << '}';
+    out << "],\n"
+        << indent << "  \"verify_window\": " << stats.verify_window << ",\n"
+        << indent << "  \"wide_rounds\": " << stats.wide_rounds << ",\n"
+        << indent << "  \"ngram_drafted_tokens\": " << stats.ngram_drafted_tokens << ",\n"
+        << indent << "  \"ngram_accepted_tokens\": " << stats.ngram_accepted_tokens << "\n"
+        << indent << '}';
 }
 
 void append_timings_json(std::ostringstream& out, const GenerationTimings& timings,
@@ -309,6 +318,7 @@ std::string usage_text(std::string_view program) {
         << "  --draft-tokens <n>         MTP 1..5; DFlash/DFlash2 1..15\n"
         << "  --lm-head-draft             use the optimized proposal head; requires a speculative "
            "backend\n"
+        << "  --ngram <off|chain>         MTP n-gram chain (default: chain)\n"
         << "  --device <id>               CUDA device ordinal (default: 0)\n"
         << "  --no-cuda-graph             use eager decode\n"
         << "  --profile-measured          bracket one measured repetition with CUDA profiler API\n"
@@ -365,6 +375,8 @@ BenchOptions parse_args(int argc, char** argv) {
             options.speculative.draft_tokens = parse_u32(value("--draft-tokens"), "draft-tokens");
         } else if (arg == "--lm-head-draft") {
             options.speculative.proposal_head = ProposalHead::Optimized;
+        } else if (product::is_ngram_cli_flag(arg)) {
+            product::apply_ngram_cli_option(arg, value(arg.data()), options.speculative.ngram);
         } else if (arg == "--device") {
             options.device = parse_nonnegative(value("--device"), "device");
         } else if (arg == "--no-cuda-graph") {
@@ -392,6 +404,7 @@ BenchOptions parse_args(int argc, char** argv) {
     if (options.prefill_chunk % kPrefillChunkAlignment != 0) {
         throw std::invalid_argument("--prefill-chunk must be a multiple of 128");
     }
+    product::normalize_speculative_options(options.speculative);
     product::validate_speculative_cli_options(options.speculative);
     return options;
 }
@@ -605,6 +618,7 @@ std::string format_table(const BenchEnvironment& env, const std::vector<TestResu
         << " spec=" << product::speculative_backend_name(env.speculative.backend)
         << " draft_tokens=" << env.speculative.draft_tokens
         << " proposal_head=" << proposal_head_name(env.speculative.proposal_head)
+        << " ngram=" << product::ngram_mode_name(env.speculative.ngram.mode)
         << " decode_path=" << decode_path_name(env.use_cuda_graph, env.speculative)
         << " graph_prime="
         << (env.decode_graph_primed

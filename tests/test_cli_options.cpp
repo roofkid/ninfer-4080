@@ -86,14 +86,29 @@ int main() {
                           ngram.speculative.ngram.min_drafts == 2 &&
                           ngram.speculative.ngram.pool_bytes == 32ULL << 20U,
                       "CLI did not preserve the n-gram options");
+    const ninfer::cli::Options ngram_default =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--spec", "mtp",
+               "--draft-tokens", "3"});
+    failures += check(ngram_default.speculative.ngram.mode == ninfer::NgramDraftMode::Chain &&
+                          ngram_default.speculative.ngram.max_drafts == 15,
+                      "the MTP chain is not enabled by default");
+    const ninfer::cli::Options ngram_off =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--spec", "mtp",
+               "--draft-tokens", "3", "--ngram", "off"});
+    failures += check(ngram_off.speculative.ngram.mode == ninfer::NgramDraftMode::Off,
+                      "--ngram off did not disable the MTP chain");
+    const ninfer::cli::Options ngram_dflash2 =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--spec", "dflash2",
+               "--draft-tokens", "6", "--ngram", "chain"});
+    failures += check(ngram_dflash2.speculative.ngram.mode == ninfer::NgramDraftMode::Off,
+                      "a non-MTP backend did not clear the n-gram chain");
     for (const std::vector<std::string>& invalid : std::vector<std::vector<std::string>>{
-             {"--spec", "dflash2", "--draft-tokens", "6", "--ngram", "chain"},
              {"--spec", "mtp", "--draft-tokens", "3", "--ngram", "chain", "--ngram-max", "5"},
              {"--spec", "mtp", "--draft-tokens", "3", "--ngram", "chain", "--ngram-max", "16"},
              {"--spec", "mtp", "--draft-tokens", "3", "--ngram", "chain", "--ngram-n", "0"},
              {"--spec", "mtp", "--draft-tokens", "3", "--ngram", "chain", "--ngram-min", "16"},
              {"--spec", "mtp", "--draft-tokens", "3", "--ngram", "chain", "--ngram-pool-mib", "0"},
-             {"--spec", "mtp", "--draft-tokens", "3", "--ngram-max", "12"},
+             {"--spec", "mtp", "--draft-tokens", "3", "--ngram", "off", "--ngram-max", "12"},
              {"--spec", "mtp", "--draft-tokens", "3", "--ngram", "select"},
          }) {
         std::vector<std::string> arguments{"ninfer-cli", "model.ninfer", "--prompt", "hello"};

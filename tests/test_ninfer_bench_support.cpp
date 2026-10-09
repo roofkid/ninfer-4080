@@ -246,7 +246,11 @@ ninfer::SpeculativeStats speculative(std::uint64_t rounds, std::uint64_t drafted
             .drafted_tokens        = drafted,
             .accepted_tokens       = accepted,
             .fallback_steps        = fallback,
-            .accepted_per_position = std::move(per_position)};
+            .accepted_per_position = std::move(per_position),
+            .verify_window         = 15,
+            .ngram_drafted_tokens  = drafted / 2,
+            .ngram_accepted_tokens = accepted / 2,
+            .wide_rounds           = rounds / 2};
 }
 
 std::vector<qb::TestResult> sample_results() {
@@ -330,7 +334,7 @@ int test_report_contract() {
         return fail(std::string("invalid benchmark JSON: ") + error.what());
     }
 
-    failures += expect(report.at("schema_version") == 14, "report schema v14");
+    failures += expect(report.at("schema_version") == 15, "report schema v15");
     failures += expect(report.at("config").at("speculative_backend") == "mtp" &&
                            report.at("config").at("draft_tokens") == 5,
                        "report identifies its backend and window");
@@ -385,6 +389,10 @@ int test_report_contract() {
                             0.5, "rep GenerationTimings");
     failures += expect(tg.at("reps").at(0).at("speculative").at("drafted_tokens") == 5,
                        "rep SpeculativeStats");
+    failures += expect(tg.at("reps").at(0).at("speculative").at("verify_window") == 15 &&
+                           tg.at("reps").at(0).at("speculative").at("ngram_drafted_tokens") == 2 &&
+                           tg.at("reps").at(0).at("speculative").at("ngram_accepted_tokens") == 2,
+                       "rep n-gram statistics");
     return failures;
 }
 

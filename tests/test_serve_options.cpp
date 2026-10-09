@@ -230,12 +230,20 @@ int main() {
                           ngram.speculative.ngram.match_tokens == 8 &&
                           ngram.speculative.ngram.pool_bytes == 16ULL << 20U,
                       "serve options did not preserve the n-gram options");
-    bool ngram_without_mtp_rejected = false;
-    try {
-        (void)parse({"ninfer-serve", "model.ninfer", "--spec", "dflash2", "--draft-tokens", "6",
-                     "--ngram", "chain"});
-    } catch (const std::invalid_argument&) { ngram_without_mtp_rejected = true; }
-    failures += check(ngram_without_mtp_rejected, "--ngram chain was accepted without MTP");
+    const ServeOptions ngram_default =
+        parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens", "3"});
+    failures += check(ngram_default.speculative.ngram.mode == ninfer::NgramDraftMode::Chain,
+                      "the MTP chain is not enabled by default");
+    const ServeOptions ngram_off =
+        parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens", "3", "--ngram",
+               "off"});
+    failures += check(ngram_off.speculative.ngram.mode == ninfer::NgramDraftMode::Off,
+                      "--ngram off did not disable the MTP chain");
+    const ServeOptions ngram_dflash2 =
+        parse({"ninfer-serve", "model.ninfer", "--spec", "dflash2", "--draft-tokens", "6",
+               "--ngram", "chain"});
+    failures += check(ngram_dflash2.speculative.ngram.mode == ninfer::NgramDraftMode::Off,
+                      "a non-MTP backend did not clear the n-gram chain");
     bool implicit_backend_rejected = false;
     try {
         (void)parse({"ninfer-serve", "model.ninfer", "--draft-tokens", "3"});

@@ -727,12 +727,13 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
         }
         break;
     }
-    if (const NgramOptions& ngram = options.speculative.ngram; ngram.mode != NgramDraftMode::Off) {
+    // The chain extends MTP proposals only; every other backend carries the default options but
+    // never uses them, so its ranges are not validated here.
+    if (const NgramOptions& ngram = options.speculative.ngram;
+        ngram.mode != NgramDraftMode::Off &&
+        options.speculative.backend == SpeculativeBackend::Mtp) {
         if (ngram.mode != NgramDraftMode::Chain) {
             throw std::invalid_argument("unknown n-gram draft mode");
-        }
-        if (options.speculative.backend != SpeculativeBackend::Mtp) {
-            throw std::invalid_argument("n-gram drafts require the MTP backend");
         }
         if (ngram.max_drafts < options.speculative.draft_tokens + kNgramWideRoundMargin ||
             ngram.max_drafts > kMtpVerifyMaximumDrafts) {
@@ -883,7 +884,9 @@ make_sequence_planner_impl(DeviceContext& device, const EngineOptions& options,
         .speculative_backend = options.speculative.backend,
         .kv_storage          = options.kv_cache,
         .proposal_head       = options.speculative.proposal_head,
-        .ngram               = options.speculative.ngram,
+        .ngram               = options.speculative.backend == SpeculativeBackend::Mtp
+                                   ? options.speculative.ngram
+                                   : NgramOptions{.mode = NgramDraftMode::Off},
         .features            = qwen3_6::startup_features(options),
         .use_cuda_graph      = options.use_cuda_graph,
         .causal_scoring      = options.purpose == EnginePurpose::CausalScoring,
