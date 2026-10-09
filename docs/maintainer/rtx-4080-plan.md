@@ -138,6 +138,15 @@ A16 T=9..16 0.68-0.69x, T=2..8 at parity. The engine DFlash2 K=15 code scenario 
 real DFlash2 and n-gram routes pass, and full `ctest` is 133/120/13/0. §11 has the design and the
 codegen finding that kept the narrow kernels from regressing.
 
+**Session 29 (2026-10-09) made the MTP n-gram chain the default.** `NgramOptions::mode` is now
+`Chain`, so `--spec mtp` runs the session-7/19 host n-gram chain unless `--ngram off` is passed;
+DFlash/DFlash2 clear the option at parse time so logs, metrics and the engine plan report the
+effective mode. This is where the session-28 wide tile pays in the shipped profile: on the
+structured-JSONL scenario MTP3 goes 145.8 -> 166.9 tok/s with an unchanged output hash, the tiled
+corpus depth sweep goes 151/142/130/122 -> 361/385/332/303 tok/s (DFlash2 K=7: 168/265/241/213),
+and the 100K + vision profile still validates with ~827 MiB free (-53 MiB). The one-shot code
+scenario is unaffected (0 wide rounds). §11 has the design, memory and comparison record.
+
 Environment for this plan: the `Dockerfile.dev` image in this repository. It is the sandbox the
 maintainer hands to pi, with the host RTX 4080 passed through:
 
@@ -2581,3 +2590,43 @@ control, and CSVs/logs are under `profiles/bench/5c-c16/`):
 - Full `ctest` 133/120/13/0 twice; `git diff --check` clean.
 
 Session-21 item (c) is closed, and with it the session-21 next-step list.
+
+### MTP n-gram chain on by default (2026-10-09, session 29)
+
+**Decision.** The host n-gram chain (session 7 port, session 19 wide window) is now the default for
+`--spec mtp`: `NgramOptions::mode = Chain`, `--ngram off` opts out. The model is that the chain
+extends MTP proposals only; every other speculative backend clears the options at parse time
+(`product::normalize_speculative_options`, called by the CLI, serve and bench parsers before
+validation) so request logs, metrics and the engine plan report the effective mode. The engine
+planning normalizes again for SDK callers (`layouts_impl.h` clears a non-MTP `ngram` and validates
+the ranges only for MTP); the pool is no longer allocated for other backends.
+
+**Why it is the default.** Structured and repetitive generation is a common user workload, and the
+chain is free when it cannot help: a round widens to the 9..16 window only when some row's pool
+extension reaches `draft_tokens + 3`, and the session-28 wide tile cut that round's cost ~31%.
+
+- `scenario_structured_jsonl.json`, greedy, `rk4v4-e8`, 256 tokens: MTP3 (chain, default) 166.9
+  tok/s in 57 rounds (6 wide, 44 n-gram-accepted) against 145.8 tok/s in 67 rounds with
+  `--ngram off`; output hash unchanged. `scenario_code_python.json` is a no-op (0 wide rounds,
+  113.8 vs 114.1 tok/s) because the answer has no long suffix repeat.
+- Tiled-corpus depth sweep (`ninfer_bench`, `rk4v4-e8`, `--prefill-chunk 1024`, one warmup and one
+  repetition; logs `profiles/bench/5c-ngram-default/`): MTP3 361.0/384.7/332.0/302.0 tok/s at
+  8K/32K/64K/98K against 150.5/141.7/130.3/122.2 with `--ngram off`; DFlash2 K=7
+  168.1/264.6/241.1/213.5. The repeated corpus amplifies the chain by construction, so the README
+  and model-card tables now carry the chain column and the `--ngram off` control.
+- Memory (RTX 4080, 100K + vision + MTP3, `--host-kv-mib 4096`): the wide graph family adds
+  118 MB to the runtime reservation (2.747 -> 2.865 GB) and takes 53 MB of the after-startup slack
+  (922 -> 867 MB, ~827 MiB free); the profile still validates and listens.
+- Tooling: `ninfer_bench` gained `--ngram off|chain` and reports the mode in its config line;
+  schema v15 adds `verify_window`, `wide_rounds`, `ngram_drafted_tokens` and
+  `ngram_accepted_tokens` to each repetition (the C++ support test, the matrix tool and
+  `bench/README.md` moved to v15).
+- Tests: CLI/serve option suites cover the MTP default, the `--ngram off` opt-out and the
+  non-MTP normalization; the full `ctest` is 133/120/13/0.
+
+**DFlash2 comparison on the same build** (greedy): structured JSONL 272.6 tok/s at K=15 and 239.4
+at K=7 against MTP3's 166.9 — DFlash2 is still the faster backend where it fits, and K=15's output
+matches MTP3's while K=7 takes a different valid branch (the unspecified `tags` values), the
+session-15 trajectory class. On the one-shot code scenario DFlash2 K=7 stays ahead (136.5 vs
+113.8) and K=15 is behind (109.8). The chain's value is closing part of the structured gap with no
+extra weight memory and no context penalty.
