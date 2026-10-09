@@ -45,6 +45,8 @@ NumericFormat endpoint_format(WeightsProfile weights_profile) {
         return NumericFormat::Q4G64_F16S;
     case WeightsProfile::Qwen38GsqRcoIq3S:
         return NumericFormat::Q4G64_F16S;
+    case WeightsProfile::Qwen38ByteshapeIq3s:
+        return NumericFormat::Q4G64_F16S;
     }
     throw std::invalid_argument("qwen3_6_27b: invalid weights profile");
 }
@@ -475,7 +477,8 @@ void bind_qwen38_nvfp4_text_layers(artifact::Binder& binder, BindingPlan& out) {
 // Q4G64_F16S, and every other profile keeps the stock W8G32_F16S words.
 NumericFormat dflash2_matrix_format(WeightsProfile weights_profile) {
     const bool q4_companion = weights_profile == WeightsProfile::Qwen38Gsq3 ||
-                              weights_profile == WeightsProfile::Qwen38GsqRcoIq3S;
+                              weights_profile == WeightsProfile::Qwen38GsqRcoIq3S ||
+                              weights_profile == WeightsProfile::Qwen38ByteshapeIq3s;
     return q4_companion ? NumericFormat::Q4G64_F16S : NumericFormat::W8G32_F16S;
 }
 
@@ -575,6 +578,7 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_
         bind_gsq3_text_layers(binder, out);
         break;
     case WeightsProfile::Qwen38GsqRcoIq3S:
+    case WeightsProfile::Qwen38ByteshapeIq3s:
         bind_gsqrco_text_layers(binder, out);
         break;
     default:

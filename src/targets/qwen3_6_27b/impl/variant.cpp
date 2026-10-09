@@ -395,6 +395,7 @@ std::size_t Variant::attention_projection_workspace_capacity_bytes(WeightsProfil
             QType::Q3G128_F16S, TextConfig::query_size + TextConfig::kv_size, TextConfig::hidden,
             kQ3TextPolicy, first, last);
     case WeightsProfile::Qwen38GsqRcoIq3S:
+    case WeightsProfile::Qwen38ByteshapeIq3s:
         // The Q4 route needs no attn_input_proj workspace; only the Q3 layers do.
         return ops::attn_input_proj_workspace_capacity_bytes(
             QType::Q3G128_F16S, TextConfig::query_size + TextConfig::kv_size, TextConfig::hidden,
@@ -423,6 +424,7 @@ std::size_t Variant::attention_output_projection_workspace_capacity_bytes(
                                                         TextConfig::query_size,
                                                         kQ3TextPolicy, first, last);
     case WeightsProfile::Qwen38GsqRcoIq3S:
+    case WeightsProfile::Qwen38ByteshapeIq3s:
         return std::max(
             ops::linear_add_workspace_capacity_bytes(QType::Q3G128_F16S, TextConfig::hidden,
                                                      TextConfig::query_size, kQ3TextPolicy,
@@ -457,6 +459,7 @@ std::size_t Variant::gdn_input_projection_workspace_capacity_bytes(WeightsProfil
             TextConfig::hidden,
             kQ3TextPolicy, first, last);
     case WeightsProfile::Qwen38GsqRcoIq3S:
+    case WeightsProfile::Qwen38ByteshapeIq3s:
         // The Q4 route needs no GDN input workspace; only the Q3 layers do.
         return ops::gdn_input_proj_workspace_capacity_bytes(
             QType::Q3G128_F16S, 2 * (TextConfig::key_dim + TextConfig::value_dim),
@@ -490,6 +493,7 @@ std::size_t Variant::gdn_input_projection_snapshot_workspace_capacity_bytes(
                             TextConfig::hidden, ops::LinearPolicy::A16Only, batch_size, first,
                             last));
     case WeightsProfile::Qwen38GsqRcoIq3S:
+    case WeightsProfile::Qwen38ByteshapeIq3s:
         return std::max(
             ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
                 TextConfig::key_dim, TextConfig::key_dim, TextConfig::value_dim, batch_size, first,
@@ -531,6 +535,7 @@ std::size_t Variant::gdn_input_projection_record_workspace_capacity_bytes(
                             TextConfig::hidden, ops::LinearPolicy::A16Only, batch_size, first,
                             last));
     case WeightsProfile::Qwen38GsqRcoIq3S:
+    case WeightsProfile::Qwen38ByteshapeIq3s:
         return std::max(
             ops::gdn_input_proj_conv_record_workspace_capacity_bytes(
                 TextConfig::key_dim, TextConfig::key_dim, TextConfig::value_dim, batch_size, first,
@@ -569,6 +574,7 @@ std::size_t Variant::gdn_output_projection_workspace_capacity_bytes(WeightsProfi
                                                         TextConfig::value_dim,
                                                         kQ3TextPolicy, first, last);
     case WeightsProfile::Qwen38GsqRcoIq3S:
+    case WeightsProfile::Qwen38ByteshapeIq3s:
         return std::max(
             ops::linear_add_workspace_capacity_bytes(QType::Q3G128_F16S, TextConfig::hidden,
                                                      TextConfig::value_dim, kQ3TextPolicy,
@@ -606,6 +612,7 @@ std::size_t Variant::post_mixer_workspace_capacity_bytes(WeightsProfile weights_
         return post_mixer_workspace_bytes(QType::Q3G128_F16S, QType::Q3G128_F16S,
                                           kQ3TextPolicy, first, last);
     case WeightsProfile::Qwen38GsqRcoIq3S:
+    case WeightsProfile::Qwen38ByteshapeIq3s:
         return std::max(post_mixer_workspace_bytes(QType::Q3G128_F16S, QType::Q3G128_F16S,
                                                    kQ3TextPolicy, first, last),
                         post_mixer_workspace_bytes(QType::Q4G64_F16S, QType::Q5G64_F16S,

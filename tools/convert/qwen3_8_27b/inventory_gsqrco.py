@@ -101,7 +101,11 @@ def object_source_tensors(name: str) -> tuple[str, ...] | None:
     return None
 
 
-def _source_rank(source_types: Mapping[str, str], sources: tuple[str, ...]) -> int:
+def _source_rank(
+    source_types: Mapping[str, str],
+    sources: tuple[str, ...],
+    type_formats: Mapping[str, str],
+) -> int:
     """Highest registered-format rank among the GGUF sources of one object."""
 
     ranks: list[int] = []
@@ -110,14 +114,24 @@ def _source_rank(source_types: Mapping[str, str], sources: tuple[str, ...]) -> i
         if ggml_type is None:
             raise KeyError(f"source tensor {source!r} is absent from the GGUF")
         try:
-            ranks.append(_FORMAT_RANK[GGUF_FORMAT[ggml_type]])
+            ranks.append(_FORMAT_RANK[type_formats[ggml_type]])
         except KeyError as error:
             raise ValueError(f"{source}: unsupported GGML type {ggml_type!r}") from error
     return max(ranks)
 
 
-def object_format(name: str, registered_format: str, source_types: Mapping[str, str]) -> str:
-    """Resolve one artifact object's format from the GGUF per-tensor types."""
+def object_format(
+    name: str,
+    registered_format: str,
+    source_types: Mapping[str, str],
+    type_formats: Mapping[str, str] = GGUF_FORMAT,
+) -> str:
+    """Resolve one artifact object's format from the GGUF per-tensor types.
+
+    ``type_formats`` is the source allocation's GGML-name-to-registered-format
+    map; other published allocations (for example byteshape's ShapeLearn mix)
+    reuse this route resolution with their own map.
+    """
 
     if name in _ENDPOINTS:
         return Q4
@@ -133,28 +147,30 @@ def object_format(name: str, registered_format: str, source_types: Mapping[str, 
             rank = _source_rank(
                 source_types,
                 (prefix + "attn_q.weight", prefix + "attn_k.weight", prefix + "attn_v.weight"),
+                type_formats,
             )
             if rank >= 4:
                 return Q4 if suffix == "attention/query_key" else Q5
             return Q3
         if suffix == "attention/output":
-            rank = _source_rank(source_types, (prefix + "attn_output.weight",))
+            rank = _source_rank(source_types, (prefix + "attn_output.weight",), type_formats)
             return Q5 if rank >= 4 else Q3
     else:
         if suffix in ("gdn/query_key", "gdn/value_z"):
             rank = _source_rank(source_types, (prefix + "attn_qkv.weight",
-                                                prefix + "attn_gate.weight"))
+                                                prefix + "attn_gate.weight"), type_formats)
             if rank >= 4:
                 return Q4 if suffix == "gdn/query_key" else Q5
             return Q3
         if suffix == "gdn/output":
-            rank = _source_rank(source_types, (prefix + "ssm_out.weight",))
+            rank = _source_rank(source_types, (prefix + "ssm_out.weight",), type_formats)
             return Q5 if rank >= 4 else Q3
     if suffix == "mlp/gate_up":
-        rank = _source_rank(source_types, (prefix + "ffn_gate.weight", prefix + "ffn_up.weight"))
+        rank = _source_rank(source_types, (prefix + "ffn_gate.weight", prefix + "ffn_up.weight"),
+                            type_formats)
         return Q4 if rank >= 4 else Q3
     if suffix == "mlp/down":
-        rank = _source_rank(source_types, (prefix + "ffn_down.weight",))
+        rank = _source_rank(source_types, (prefix + "ffn_down.weight",), type_formats)
         return Q5 if rank >= 4 else Q3
     return registered_format
 
