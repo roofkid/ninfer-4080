@@ -2676,3 +2676,9 @@ the launcher never rebuilds it), while the flag is valid on both the published a
 binary. The DFlash2 launchers stay untouched because the chain is MTP-only and the published
 binary rejects the flag with `--spec dflash2`. The launcher headers now carry the session-29 depth
 sweep instead of the pre-chain numbers.
+
+**Image republished (2026-10-09).** `roofkid/ninfer-4080:0.6.2-rtx4080` (digest
+`sha256:bfbf286f429651295ed73feb8ef4f52a7bac30237d995c7e8dfeb37bb79867f9`) and the refreshed
+`gsq3` tag carry the session-28/29 binaries; the artifact is unchanged (`c6f2707...`), so the
+Hugging Face refresh was the card and manifest only. The launchers' explicit `--ngram chain` stays
+valid on both image revisions. README and port ledger now name the new tag.

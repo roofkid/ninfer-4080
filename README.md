@@ -26,7 +26,7 @@ documented in [docs/](docs/).
 - 3.125 bpw Text body repacked verbatim from the publisher; Q4 vocabulary endpoints; DFlash2
   companion requantized to Q4 and enabled.
 - Artifact: [roofkid/Qwen3.8-27B-GSQ3-NInfer](https://huggingface.co/roofkid/Qwen3.8-27B-GSQ3-NInfer)
-  (12.4 GiB). Image: `roofkid/ninfer-4080:gsq3` (Docker Hub, tags `gsq3` and `0.6.1-rtx4080`).
+  (12.4 GiB). Image: `roofkid/ninfer-4080:gsq3` (Docker Hub, tags `gsq3` and `0.6.2-rtx4080`).
 - Three commands: download, `docker run`, serve.
 
 ## How to use it

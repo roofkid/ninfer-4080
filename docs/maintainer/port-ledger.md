@@ -122,10 +122,13 @@ deleted when the work finishes. Three items belong in this ledger:
   (`qwen3_8_27b_gsq3.ninfer`, 13,330,776,576 bytes, sha256
   `c6f27073393e5bcc629489420470d71f52a27553bfc5c360fef07a25b3b550d7`), the model card, the
   manifest, and the hash list; `roofkid/ninfer-4080:gsq3` (Docker Hub, tags `gsq3` and
-  `0.6.1-rtx4080`) is the binaries-only image. `scripts/download-qwen38-gsq3.{sh,bat}` fetch and
-  verify the
-  artifact, the 4080 launchers pull the published image with a local source build as the
-  fallback, and the README carries the three-command consumer quick start. The `gsq3`
+  `0.6.2-rtx4080`, digest
+  `sha256:bfbf286f429651295ed73feb8ef4f52a7bac30237d995c7e8dfeb37bb79867f9`) is the
+  binaries-only image. The image was republished 2026-10-09 with the session-28/29 decode work
+  (native 16-column small-T tile, MTP n-gram chain default) while the artifact stayed unchanged.
+  `scripts/download-qwen38-gsq3.{sh,bat}` fetch and verify the artifact, the 4080 launchers pull
+  the published image with a local source build as the fallback, and the README carries the
+  three-command consumer quick start. The `gsq3`
   storage contract is documented in `qwen3.8-27b-artifact.md` section 14. The artifact
   sources are Apache-2.0 (GSQ checkpoint, base model, DFlash2), and the card states that
   the verbatim claim covers the 323 packed objects from the GSQ checkpoint while the MTP,
