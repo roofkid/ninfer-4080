@@ -106,7 +106,8 @@ public:
 private:
     void* data_       = nullptr;
     std::size_t size_ = 0;
-    // LOCAL PROTOTYPE: true when `data_` came from std::malloc rather than cudaMallocHost.
+    // Set when `data_` is a plain (pageable) host allocation, freed with std::free,
+    // rather than a cudaMallocHost pin.
     bool pageable_    = false;
 };
 

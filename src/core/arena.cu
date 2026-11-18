@@ -245,7 +245,7 @@ void DeviceArena::reset_peak() noexcept { peak_ = off_; }
 PinnedHostBuffer::PinnedHostBuffer(std::size_t size_bytes) {
     if (size_bytes == 0) { throw std::invalid_argument("PinnedHostBuffer size must be nonzero"); }
 
-    // LOCAL PROTOTYPE (KVMem-style ring): allow pageable host memory instead of a pinned mapping.
+    // Optional fallback: back the arena with pageable host memory instead of a pinned mapping.
     // On Windows/WDDM a pinned allocation is mapped into the GPU address space and charged against
     // the card, which caps the host KV arena at whatever VRAM is free. Pageable memory is not
     // mapped, so it is charged to system RAM only; the cost is that cudaMemcpy to and from it is
