@@ -252,8 +252,12 @@ PinnedHostBuffer::PinnedHostBuffer(std::size_t size_bytes) {
     // staged through a bounce buffer rather than being truly asynchronous.
     const char* pageable_env = std::getenv("NINFER_HOST_PAGEABLE");
     if (pageable_env != nullptr && pageable_env[0] != '\0' && pageable_env[0] != '0') {
-        void* ptr = std::malloc(size_bytes);
-        if (ptr == nullptr) {
+        // Must be direct-IO aligned (4096): the artifact materializer stages through these
+        // buffers via read_direct(), which rejects unaligned destination pointers. Plain
+        // malloc gives 16-byte alignment; cudaMallocHost was page-aligned. posix_memalign
+        // is compatible with std::free in the dtor.
+        void* ptr = nullptr;
+        if (posix_memalign(&ptr, 4096, size_bytes) != 0 || ptr == nullptr) {
             throw std::runtime_error("failed to allocate " +
                                      std::to_string((size_bytes + (1ULL << 20) - 1) >> 20) +
                                      " MiB of pageable host memory");
