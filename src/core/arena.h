@@ -106,6 +106,9 @@ public:
 private:
     void* data_       = nullptr;
     std::size_t size_ = 0;
+    // Set when `data_` is a plain (pageable) host allocation, freed with std::free,
+    // rather than a cudaMallocHost pin.
+    bool pageable_    = false;
 };
 
 using WorkspaceArena = DeviceArena;
