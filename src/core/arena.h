@@ -106,6 +106,8 @@ public:
 private:
     void* data_       = nullptr;
     std::size_t size_ = 0;
+    // LOCAL PROTOTYPE: true when `data_` came from std::malloc rather than cudaMallocHost.
+    bool pageable_    = false;
 };
 
 using WorkspaceArena = DeviceArena;

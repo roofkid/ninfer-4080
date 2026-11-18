@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <new>
 #include <stdexcept>
@@ -244,33 +245,90 @@ void DeviceArena::reset_peak() noexcept { peak_ = off_; }
 PinnedHostBuffer::PinnedHostBuffer(std::size_t size_bytes) {
     if (size_bytes == 0) { throw std::invalid_argument("PinnedHostBuffer size must be nonzero"); }
 
+    // LOCAL PROTOTYPE (KVMem-style ring): allow pageable host memory instead of a pinned mapping.
+    // On Windows/WDDM a pinned allocation is mapped into the GPU address space and charged against
+    // the card, which caps the host KV arena at whatever VRAM is free. Pageable memory is not
+    // mapped, so it is charged to system RAM only; the cost is that cudaMemcpy to and from it is
+    // staged through a bounce buffer rather than being truly asynchronous.
+    const char* pageable_env = std::getenv("NINFER_HOST_PAGEABLE");
+    if (pageable_env != nullptr && pageable_env[0] != '\0' && pageable_env[0] != '0') {
+        void* ptr = std::malloc(size_bytes);
+        if (ptr == nullptr) {
+            throw std::runtime_error("failed to allocate " +
+                                     std::to_string((size_bytes + (1ULL << 20) - 1) >> 20) +
+                                     " MiB of pageable host memory");
+        }
+        data_     = ptr;
+        size_     = size_bytes;
+        pageable_ = true;
+        return;
+    }
+
+    // A pending error from an earlier call is returned by whatever runs next, so read and clear it
+    // first. Without this, a failure here can be somebody else's error wearing this message.
+    const cudaError_t pending = cudaGetLastError();
+
     void* ptr             = nullptr;
     const cudaError_t err = cudaMallocHost(&ptr, size_bytes);
     if (err != cudaSuccess) {
-        throw std::runtime_error(cuda_error_message("cudaMallocHost failed", err));
+        // Say the size and say which memory. `cudaErrorMemoryAllocation: out of memory` reads as
+        // a VRAM shortfall and sends people to nvidia-smi when the shortfall is pinned system RAM.
+        // But the converse also happens: on Windows/WDDM this allocation is mapped into the GPU's
+        // address space and charged against the card, so a large pin fails once the device is
+        // nearly full even with tens of GiB of system RAM free. Report free VRAM so the two are
+        // distinguishable rather than asserting which one it is.
+        std::size_t free_device = 0, total_device = 0;
+        const cudaError_t info = cudaMemGetInfo(&free_device, &total_device);
+        std::string prefix     = "cudaMallocHost failed to pin " +
+                             std::to_string((size_bytes + (1ULL << 20) - 1) >> 20) +
+                             " MiB of host memory";
+        if (info == cudaSuccess) {
+            prefix += " (device has " + std::to_string(free_device >> 20) + " MiB of " +
+                      std::to_string(total_device >> 20) + " MiB free; on Windows a pinned host "
+                      "allocation is mapped into the GPU address space and competes with it)";
+        } else {
+            prefix += " (system RAM, pinned)";
+        }
+        if (pending != cudaSuccess) {
+            prefix += ", after an unrelated pending error: " + cuda_error_message("", pending);
+        }
+        throw std::runtime_error(cuda_error_message(prefix.c_str(), err));
     }
 
     data_ = ptr;
     size_ = size_bytes;
 }
 
-PinnedHostBuffer::~PinnedHostBuffer() { free_pinned(data_); }
+PinnedHostBuffer::~PinnedHostBuffer() {
+    if (pageable_) {
+        std::free(data_);
+    } else {
+        free_pinned(data_);
+    }
+}
 
 PinnedHostBuffer::PinnedHostBuffer(PinnedHostBuffer&& other) noexcept
-    : data_(other.data_), size_(other.size_) {
-    other.data_ = nullptr;
-    other.size_ = 0;
+    : data_(other.data_), size_(other.size_), pageable_(other.pageable_) {
+    other.data_     = nullptr;
+    other.size_     = 0;
+    other.pageable_ = false;
 }
 
 PinnedHostBuffer& PinnedHostBuffer::operator=(PinnedHostBuffer&& other) noexcept {
     if (this == &other) { return *this; }
 
-    free_pinned(data_);
-    data_ = other.data_;
-    size_ = other.size_;
+    if (pageable_) {
+        std::free(data_);
+    } else {
+        free_pinned(data_);
+    }
+    data_     = other.data_;
+    size_     = other.size_;
+    pageable_ = other.pageable_;
 
-    other.data_ = nullptr;
-    other.size_ = 0;
+    other.data_     = nullptr;
+    other.size_     = 0;
+    other.pageable_ = false;
     return *this;
 }
 
