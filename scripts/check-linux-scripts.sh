@@ -31,7 +31,7 @@ cat > "$tmp/ninfer-serve" <<'SERVER'
 printf '%s\n' "$@" > "$NINFER_TEST_ARGS"
 SERVER
 chmod +x "$tmp/ninfer-serve"
-touch "$tmp/qwen3_8_27b.ninfer" "$tmp/qwen3_6_35b_a3b.ninfer"
+touch "$tmp/qwen3_8_27b.ninfer" "$tmp/qwen3_6_35b_a3b.ninfer" "$tmp/sensenova_loop_9b.ninfer"
 
 launchers=(
   'run-qwen38-c1.sh:qwen3_8_27b.ninfer:--max-context:65536'
@@ -46,6 +46,14 @@ for entry in "${launchers[@]}"; do
     "$root/$script" "$tmp/$model" >/dev/null
   grep -Fx -- "$expected" "$args" >/dev/null
   grep -Fx -- "$value" "$args" >/dev/null
+done
+
+# SenseNova's 256K launcher pins the full text+vision+MTP profile.
+NINFER_SERVER="$tmp/ninfer-serve" NINFER_TEST_ARGS="$tmp/sensenova.args" \
+  "$root/run-sensenova-loop-9b.sh" "$tmp/sensenova_loop_9b.ninfer" >/dev/null
+for expected in --max-context 262144 --kv-dtype int8 --max-concurrency 1 \
+  --spec mtp --draft-tokens 3 --ngram chain --vision; do
+  grep -Fx -- "$expected" "$tmp/sensenova.args" >/dev/null
 done
 
 # The 4080 launchers build the product image once per checkout revision. Stub
