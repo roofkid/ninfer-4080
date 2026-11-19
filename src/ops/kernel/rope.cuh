@@ -182,7 +182,9 @@ static __global__ void rope_generic_kernel(const std::int32_t* positions, std::i
                                            std::int32_t head_dim, std::int32_t rotary_dim,
                                            float theta, std::int32_t q_heads, std::int32_t k_heads,
                                            std::int32_t tokens, std::int64_t q_token_stride,
-                                           std::int64_t k_token_stride) {
+                                           std::int64_t k_token_stride, float yarn_factor,
+                                           float yarn_low, float yarn_high,
+                                           float yarn_attention_scale, std::int32_t yarn_enabled) {
     const int token = static_cast<int>(blockIdx.x);
     if (token >= tokens) { return; }
     const int half = rotary_dim / 2;
@@ -197,11 +199,36 @@ static __global__ void rope_generic_kernel(const std::int32_t* positions, std::i
             int axis       = 0;
             float exponent = 0.0F;
             generic_axis_frequency(axes, head_dim, rotary_dim, pair, &axis, &exponent);
-            const float frequency = powf(theta, exponent);
-            const float angle =
-                static_cast<float>(positions[static_cast<std::int64_t>(axis) * tokens + token]) *
-                frequency;
-            sincosf(angle, &sin_cache[pair], &cos_cache[pair]);
+            if (yarn_enabled != 0) {
+                // The phase can exceed 2^18 radians at the release context limit. Evaluate the
+                // scaled frequency and phase in FP64 so the stored coefficient tracks the naive
+                // oracle rather than accumulating float range-reduction error.
+                const double extrapolation = pow(static_cast<double>(theta),
+                                                 static_cast<double>(exponent));
+                const double interpolation = extrapolation / static_cast<double>(yarn_factor);
+                const double ramp = fmin(
+                    fmax((static_cast<double>(pair) - static_cast<double>(yarn_low)) /
+                             (static_cast<double>(yarn_high) - static_cast<double>(yarn_low)),
+                         0.0),
+                    1.0);
+                const double frequency = interpolation * ramp + extrapolation * (1.0 - ramp);
+                const double angle =
+                    static_cast<double>(
+                        positions[static_cast<std::int64_t>(axis) * tokens + token]) *
+                    frequency;
+                double sine = 0.0;
+                double cosine = 0.0;
+                sincos(angle, &sine, &cosine);
+                sin_cache[pair] = static_cast<float>(sine * static_cast<double>(yarn_attention_scale));
+                cos_cache[pair] = static_cast<float>(cosine * static_cast<double>(yarn_attention_scale));
+            } else {
+                const float frequency = powf(theta, exponent);
+                const float angle =
+                    static_cast<float>(
+                        positions[static_cast<std::int64_t>(axis) * tokens + token]) *
+                    frequency;
+                sincosf(angle, &sin_cache[pair], &cos_cache[pair]);
+            }
         }
     }
     __syncthreads();

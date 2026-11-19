@@ -33,8 +33,9 @@ namespace ninfer::ops {
  *   g[h,t]    = -exp(A_log[h]) * softplus(a[h,t] + dt_bias[h])
  *   beta[h,t] = sigmoid(b[h,t]).
  *
- * `x` is contiguous BF16 [5120,T]; both weights are contiguous BF16_CTRL [48,5120]; A_log and
- * dt_bias are contiguous FP32 [48]; g and beta are distinct contiguous FP32 [48,T]. The numerical
+ * Registered exact geometries are x BF16 [5120,T] with BF16_CTRL [48,5120] weights,
+ * x [2048,T] with [32,2048], and x [4096,T] with [32,4096]; A_log and dt_bias are contiguous
+ * FP32 [heads]; g and beta are distinct contiguous FP32 [heads,T]. The numerical
  * contract accepts every positive T. The oracle evaluates the logical formula naively in FP64
  * from the represented inputs. Projection staging, accumulator precision, and any private
  * materialization are implementation choices. The FP32 outputs are promoted and compared directly
@@ -52,7 +53,8 @@ void gdn_gating_proj(const Tensor& x, const Weight& a_weight, const Weight& b_we
  * Registered contiguous-parent storage forms of gdn_gating_proj:
  *
  * - Qwen3.8-27B: BF16_CTRL `ab_weight [96,5120]`, with A in rows [0,48) and B in [48,96);
- * - Qwen3.6-35B-A3B: BF16_CTRL `ab_weight [64,2048]`, with A in rows [0,32) and B in [32,64).
+ * - Qwen3.6-35B-A3B: BF16_CTRL `ab_weight [64,2048]`, with A in rows [0,32) and B in [32,64);
+ * - SenseNova-Loop-9B: BF16_CTRL `ab_weight [64,4096]`, with A in rows [0,32) and B in [32,64).
  *
  * The complete immutable parent is the public weight. Its halves are consumed as zero-copy views
  * and produce FP32 g/beta `[heads,T]` under the same logical formula and oracle. All other effects

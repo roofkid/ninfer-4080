@@ -20,6 +20,30 @@ Tensor vector(Allocator& allocator, DType dtype, std::int32_t elements) {
     return allocator.alloc(dtype, {elements});
 }
 
+
+struct MhcRoots {
+    Tensor streams;
+    Tensor merged;
+    Tensor branch;
+    Tensor hidden;
+    Tensor post;
+    Tensor mix;
+};
+
+// Persistent buffers for one slot loop of an mHC target. They live across all layers, so callers
+// allocate them in the enclosing text-body scope rather than inside one layer scope.
+template <class Config, class Allocator>
+MhcRoots mhc(Allocator& allocator, std::int32_t tokens) {
+    return {
+        matrix(allocator, DType::BF16, 2 * Config::hidden, tokens),
+        matrix(allocator, DType::BF16, 2 * Config::hidden, tokens),
+        matrix(allocator, DType::BF16, Config::hidden, tokens),
+        matrix(allocator, DType::BF16, Config::hidden, tokens),
+        matrix(allocator, DType::FP32, 2, tokens),
+        matrix(allocator, DType::FP32, 4, tokens),
+    };
+}
+
 struct TextPrefillRoots {
     Tensor ids;
     Tensor positions;

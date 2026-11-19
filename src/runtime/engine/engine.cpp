@@ -238,10 +238,13 @@ class Engine::Impl {
 public:
     using Core27      = runtime::EngineCore<targets::Qwen3_6_27BInstance>;
     using Core35      = runtime::EngineCore<targets::Qwen3_6_35BA3BInstance>;
+    using Core9B      = runtime::EngineCore<targets::SenseNovaLoop9BInstance>;
     using ScoreCore27 = runtime::CausalScoreCore<targets::Qwen3_6_27BInstance>;
     using ScoreCore35 = runtime::CausalScoreCore<targets::Qwen3_6_35BA3BInstance>;
+    using ScoreCore9B = runtime::CausalScoreCore<targets::SenseNovaLoop9BInstance>;
     using Core = std::variant<std::monostate, std::unique_ptr<Core27>, std::unique_ptr<Core35>,
-                              std::unique_ptr<ScoreCore27>, std::unique_ptr<ScoreCore35>>;
+                              std::unique_ptr<Core9B>, std::unique_ptr<ScoreCore27>,
+                              std::unique_ptr<ScoreCore35>, std::unique_ptr<ScoreCore9B>>;
 
     explicit Impl(EngineOptions engine_options)
         : options(normalize_engine_options(std::move(engine_options))),
@@ -261,6 +264,12 @@ public:
                         return std::make_unique<ScoreCore27>(*target_ptr, device);
                     }
                     return std::make_unique<Core27>(*target_ptr, device, options,
+                                                    std::move(constructed.context_cost));
+                } else if constexpr (std::is_same_v<Instance, targets::SenseNovaLoop9BInstance>) {
+                    if (options.purpose == EnginePurpose::CausalScoring) {
+                        return std::make_unique<ScoreCore9B>(*target_ptr, device);
+                    }
+                    return std::make_unique<Core9B>(*target_ptr, device, options,
                                                     std::move(constructed.context_cost));
                 } else {
                     if (options.purpose == EnginePurpose::CausalScoring) {
@@ -488,7 +497,8 @@ std::vector<float> Engine::score_tokens(std::vector<TokenId> tokens, std::uint32
         [&](auto& core) -> std::vector<float> {
             using CoreState = std::remove_cvref_t<decltype(core)>;
             if constexpr (std::is_same_v<CoreState, std::unique_ptr<Impl::ScoreCore27>> ||
-                          std::is_same_v<CoreState, std::unique_ptr<Impl::ScoreCore35>>) {
+                          std::is_same_v<CoreState, std::unique_ptr<Impl::ScoreCore35>> ||
+                          std::is_same_v<CoreState, std::unique_ptr<Impl::ScoreCore9B>>) {
                 return core->score(std::move(prompt.impl_->value), first_target);
             } else {
                 throw std::logic_error("Engine scoring core is unavailable");
@@ -584,7 +594,8 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
             if constexpr (std::is_same_v<CoreState, std::monostate>) {
                 throw std::logic_error("Engine core is unavailable");
             } else if constexpr (std::is_same_v<CoreState, std::unique_ptr<Impl::ScoreCore27>> ||
-                                 std::is_same_v<CoreState, std::unique_ptr<Impl::ScoreCore35>>) {
+                                 std::is_same_v<CoreState, std::unique_ptr<Impl::ScoreCore35>> ||
+                                 std::is_same_v<CoreState, std::unique_ptr<Impl::ScoreCore9B>>) {
                 throw std::logic_error("Engine generation core is unavailable");
             } else {
                 auto submission = core->submit(std::move(prompt.impl_->value), prompt_summary,

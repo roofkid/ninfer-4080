@@ -1,6 +1,7 @@
 #include "ops/linear/q5/q5_dispatch.h"
 
 #include <stdexcept>
+#include <string>
 
 namespace ninfer::ops::detail {
 
@@ -27,6 +28,20 @@ Q5Launch select_q5_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
             return launch_q5_mma_r64_c128;
         default:
             break;
+        }
+        break;
+    case 4096:
+        if (n == 1024 || n == 4096) {
+            if (t <= 6) { return launch_q5_simt_r8_c4; }
+            if (t <= 24) { return launch_q5_simt_r8_c8; }
+            return launch_q5_mma_r64_c128;
+        }
+        break;
+    case 12288:
+        if (n == 4096) {
+            if (t <= 6) { return launch_q5_simt_r8_c4; }
+            if (t <= 24) { return launch_q5_simt_r8_c8; }
+            return launch_q5_mma_r64_c128;
         }
         break;
     case 6144:
@@ -71,7 +86,8 @@ Q5Launch select_q5_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
         break;
     }
 
-    throw std::invalid_argument("q5 linear: unsupported shape or T");
+    throw std::invalid_argument("q5 linear: unsupported shape or T (n=" + std::to_string(n) +
+                                ", k=" + std::to_string(k) + ", t=" + std::to_string(t) + ")");
 }
 
 Q5Launch select_q5_launch(std::int32_t n, std::int32_t k, std::int32_t t, LinearPolicy policy) {

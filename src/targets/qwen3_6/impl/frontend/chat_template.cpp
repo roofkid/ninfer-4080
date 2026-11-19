@@ -22,6 +22,11 @@ constexpr Sha256Digest kThinkingToggleTemplateDigest{
     0xf4, 0x11, 0x33, 0xe5, 0x1a, 0x48, 0xd7, 0xf3, 0xef, 0xcb, 0xea, 0x28, 0x39, 0x57, 0x42, 0x59,
 };
 
+constexpr Sha256Digest kSenseNovaLoopTemplateDigest{
+    0xa4, 0xae, 0xe8, 0xaf, 0xcf, 0x2e, 0x07, 0x11, 0x94, 0x2c, 0xf8, 0x48, 0x89, 0x9b, 0xe6, 0x60,
+    0x16, 0xf8, 0xd1, 0x4a, 0x88, 0x9f, 0xf9, 0xed, 0xe0, 0x7b, 0xca, 0x09, 0x9c, 0x28, 0xf7, 0x15,
+};
+
 constexpr Sha256Digest kReasoningEffortTemplateDigest{
     0xc3, 0xcf, 0x9e, 0x34, 0xab, 0xf4, 0xf9, 0xe3, 0x6c, 0x2d, 0x72, 0x16, 0x5a, 0xa9, 0xc1, 0x32,
     0xd3, 0xe2, 0xa7, 0x25, 0xb6, 0xc2, 0x58, 0x6a, 0xaa, 0x3a, 0x8a, 0xf9, 0xd7, 0xa8, 0x10, 0x41,
@@ -269,12 +274,17 @@ std::string tojson_text(const OrderedJson& value) {
     return value.dump();
 }
 
-std::string parameter_text(const OrderedJson& value) {
+std::string parameter_text(const OrderedJson& value, bool python_scalar_strings) {
     if (value.is_string()) { return value.get<std::string>(); }
+    if (python_scalar_strings && !value.is_array() && !value.is_object()) {
+        if (value.is_boolean()) { return value.get<bool>() ? "True" : "False"; }
+        if (value.is_null()) { return "None"; }
+    }
     return tojson_text(value);
 }
 
-RenderedFragment render_tool_call(const ToolCall& call, bool allow_empty_arguments) {
+RenderedFragment render_tool_call(const ToolCall& call, bool allow_empty_arguments,
+                                  bool python_scalar_strings = false) {
     RenderBuilder rendered;
     if (allow_empty_arguments && call.arguments_json.empty()) {
         rendered.append_template("<tool_call>\n<function=");
@@ -294,7 +304,7 @@ RenderedFragment render_tool_call(const ToolCall& call, bool allow_empty_argumen
         rendered.append_template("<parameter=");
         rendered.append_literal(it.key());
         rendered.append_template(">\n");
-        rendered.append_literal(parameter_text(it.value()));
+        rendered.append_literal(parameter_text(it.value(), python_scalar_strings));
         rendered.append_template("\n</parameter>\n");
     }
     rendered.append_template("</function>\n</tool_call>");
@@ -418,6 +428,9 @@ CompiledChatTemplate CompiledChatTemplate::resolve(std::string_view source) {
     }
     if (digest == kReasoningEffortTemplateDigest) {
         return CompiledChatTemplate(ChatTemplateSemantics::ReasoningEffort);
+    }
+    if (digest == kSenseNovaLoopTemplateDigest) {
+        return CompiledChatTemplate(ChatTemplateSemantics::SenseNovaLoop);
     }
     throw std::invalid_argument("unsupported frontend/chat_template.jinja (sha256 " +
                                 sha256_hex(digest) + ")");
@@ -635,7 +648,9 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
                 } else {
                     rendered.append_template("\n");
                 }
-                rendered.append(render_tool_call(message.tool_calls[call_index], effort_template));
+                rendered.append(render_tool_call(
+                    message.tool_calls[call_index], effort_template,
+                    semantics_ == ChatTemplateSemantics::SenseNovaLoop));
             }
         }
         rendered.append_template("<|im_end|>\n");

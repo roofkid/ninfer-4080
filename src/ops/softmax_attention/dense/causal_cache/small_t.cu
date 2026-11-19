@@ -169,9 +169,15 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
                 static_cast<float*>(partial_m.data), static_cast<float*>(partial_l.data));
     };
     if constexpr (TokenTile >= 6) {
-        // Small grids need more warps per CTA. From 2K to 8K, Bc=64 halves key
-        // loop iterations; dynamic smem avoids penalizing the long-context path.
-        if (implementation_window > 128 && implementation_window <= 160) {
+        if constexpr (Geometry::GroupSize == 4) {
+            // Two query-row tiles. Keep Wc/RowTiles a power of two so PVNtPerWarp stays
+            // in the registered {2,4,8,16} set.
+            if (implementation_window <= 2054) {
+                launch.template operator()<16, 1, 32, false>();
+            } else {
+                launch.template operator()<8, 2, 32, false>();
+            }
+        } else if (implementation_window > 128 && implementation_window <= 160) {
             launch.template operator()<24, 1, 32, false>();
         } else if (implementation_window <= 2054) {
             launch.template operator()<12, 1, 32, false>();
@@ -181,7 +187,13 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
             launch.template operator()<6, 2, 32, false>();
         }
     } else if constexpr (TokenTile == 5) {
-        if constexpr (Geometry::GroupSize == 6) {
+        if constexpr (Geometry::GroupSize == 4) {
+            if (implementation_window <= 2054) {
+                launch.template operator()<16, 1, 32, false>();
+            } else {
+                launch.template operator()<8, 2, 32, false>();
+            }
+        } else if constexpr (Geometry::GroupSize == 6) {
             // Two Q row tiles for the 27B group of six.
             if (implementation_window > 128 && implementation_window <= 512) {
                 launch.template operator()<32, 1, 32, false>();
@@ -252,6 +264,9 @@ std::int32_t causal_attention_split_capacity(std::int32_t q_heads, std::int32_t 
     }
     if (q_heads == CausalD256H16Kv2::QHeads) {
         return causal_small_t_launch_capacity<CausalD256H16Kv2>(envelope, tokens, cache_storage);
+    }
+    if (q_heads == CausalD256H16Kv4::QHeads) {
+        return causal_small_t_launch_capacity<CausalD256H16Kv4>(envelope, tokens, cache_storage);
     }
     throw std::invalid_argument(
         "causal_softmax_attention split capacity: unsupported head geometry");
@@ -449,6 +464,12 @@ void causal_attention_small_t_launch(
                                                               partial_m, partial_l, out, stream);
         return;
     }
+    if (q.ne[1] == CausalD256H16Kv4::QHeads && cache.num_kv_heads == 4) {
+        causal_attention_small_t_launch_for<CausalD256H16Kv4>(q, input, pos, scale, cache,
+                                                              invocation, envelope, partial_acc,
+                                                              partial_m, partial_l, out, stream);
+        return;
+    }
     causal_attention_small_t_launch_for<CausalD256H16Kv2>(q, input, pos, scale, cache, invocation,
                                                           envelope, partial_acc, partial_m,
                                                           partial_l, out, stream);
@@ -486,6 +507,12 @@ void causal_attention_cached_small_t_launch(const Tensor& q, const Tensor& pos, 
     const PagedKVBatchLayerView batch_cache = single_row_paged_kv_batch_view(cache);
     if (q.ne[1] == CausalD256H24Kv4::QHeads) {
         causal_attention_small_t_launch_for<CausalD256H24Kv4>(q, input, pos, scale, batch_cache,
+                                                              invocation, envelope, partial_acc,
+                                                              partial_m, partial_l, out, stream);
+        return;
+    }
+    if (q.ne[1] == CausalD256H16Kv4::QHeads && cache.num_kv_heads == 4) {
+        causal_attention_small_t_launch_for<CausalD256H16Kv4>(q, input, pos, scale, batch_cache,
                                                               invocation, envelope, partial_acc,
                                                               partial_m, partial_l, out, stream);
         return;

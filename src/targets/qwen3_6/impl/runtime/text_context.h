@@ -8,6 +8,8 @@
 #include "core/gdn_replay_records.h"
 #include "core/tensor.h"
 #include "core/weight.h"
+#include "ninfer/ops/mhc.h"
+#include "ninfer/ops/rope.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/softmax_attention.h"
 #include "ninfer/ops/sparse_moe.h"
@@ -29,7 +31,8 @@ namespace ninfer::targets::qwen3_6::detail::NINFER_QWEN36_RUNTIME_NS::schedule {
 // neither weights nor device state.
 struct ModelConfig {
     static constexpr int hidden              = TextConfig::hidden;
-    static constexpr int n_layers            = TextConfig::layers;
+    static constexpr int physical_layers     = TextConfig::physical_layers;
+    static constexpr int n_layers            = TextConfig::execution_slots;
     static constexpr int intermediate        = TextConfig::intermediate;
     static constexpr int vocab               = TextConfig::output_rows;
     static constexpr int token_domain        = TextConfig::token_domain;
@@ -53,19 +56,39 @@ struct ModelConfig {
     static constexpr float rope_theta        = TextConfig::rope_theta;
     static constexpr int mtp_layers          = TextConfig::mtp_layers;
 
-    [[nodiscard]] static constexpr bool is_full(int layer) {
-        return TextConfig::is_full_attention(layer);
+    [[nodiscard]] static constexpr int physical_of(int slot) {
+        return TextConfig::slot_physical_layer(slot);
     }
 
-    [[nodiscard]] static constexpr int n_full() { return TextConfig::full_attention_layers(); }
-
-    [[nodiscard]] static constexpr int n_gdn() { return TextConfig::gdn_layers(); }
-
-    [[nodiscard]] static constexpr int full_idx(int layer) {
-        return TextConfig::full_attention_index(layer);
+    // Slot queries drive the layer loop and all state/cache indexing.
+    [[nodiscard]] static constexpr bool is_full(int slot) {
+        return TextConfig::slot_is_full_attention(slot);
     }
 
-    [[nodiscard]] static constexpr int gdn_idx(int layer) { return TextConfig::gdn_index(layer); }
+    [[nodiscard]] static constexpr int n_full() { return TextConfig::full_attention_slots; }
+
+    [[nodiscard]] static constexpr int n_gdn() { return TextConfig::gdn_slots; }
+
+    [[nodiscard]] static constexpr int full_idx(int slot) {
+        return TextConfig::slot_full_index(slot);
+    }
+
+    [[nodiscard]] static constexpr int gdn_idx(int slot) { return TextConfig::slot_gdn_index(slot); }
+
+    // Physical weight queries index the materialized arrays once per slot visit.
+    [[nodiscard]] static constexpr int n_physical_full() {
+        return TextConfig::full_attention_layers();
+    }
+
+    [[nodiscard]] static constexpr int n_physical_gdn() { return TextConfig::gdn_layers(); }
+
+    [[nodiscard]] static constexpr int physical_full_idx(int physical) {
+        return TextConfig::physical_full_index(physical);
+    }
+
+    [[nodiscard]] static constexpr int physical_gdn_idx(int physical) {
+        return TextConfig::physical_gdn_index(physical);
+    }
 };
 
 inline constexpr ModelConfig kCfg{};
@@ -247,10 +270,12 @@ private:
     }
 
     [[nodiscard]] const MtpW& mtp_weights() const;
-    void attn_mix(const FullLayerW& weights, Tensor& x, int index, Phase phase);
-    void gdn_mix(const GdnLayerW& weights, Tensor& x, int index, Phase phase);
+    void attn_mix(const FullLayerW& weights, Tensor& x, int index, Phase phase,
+                  Tensor* output = nullptr);
+    void gdn_mix(const GdnLayerW& weights, Tensor& x, int index, Phase phase,
+                 Tensor* output = nullptr);
     void mlp_tail(const Tensor* post_norm, const MlpW& weights, Tensor& x, Phase phase,
-                  const ops::SparseMoeHints& hints);
+                  const ops::SparseMoeHints& hints, Tensor* output = nullptr);
     [[nodiscard]] ops::SparseMoeHints next_projection_hints(int layer) const;
     void run_layers(Tensor& x, Phase phase);
     template <class Tap>
@@ -334,8 +359,8 @@ private:
     int proposal_head_n_                        = 0;
     const ops::SamplingConfig* sampling_config_ = nullptr;
     MtpW mtp_;
-    std::array<FullLayerW, TextConfig::full_attention_layers()> full_{};
-    std::array<GdnLayerW, TextConfig::gdn_layers()> gdn_{};
+    std::array<FullLayerW, TextConfig::physical_layers> full_{};
+    std::array<GdnLayerW, TextConfig::physical_layers> gdn_{};
     std::array<Weight, TextConfig::gdn_layers()> gdn_in_a_{};
     std::array<Weight, TextConfig::gdn_layers()> gdn_in_b_{};
     std::array<Tensor, TextConfig::gdn_layers()> gdn_conv1d_views_{};

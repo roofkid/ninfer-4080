@@ -109,6 +109,15 @@ set_tests_properties(
   ninfer_kv_cache_test
   ninfer_state_store_test
   PROPERTIES SKIP_RETURN_CODE 77)
+# Compile-time physical-layer/execution-slot mapping for the looped target.
+ninfer_add_test(ninfer_sensenova_loop_9b_plan_test
+  SOURCES targets/sensenova_loop_9b/test_execution_plan.cpp
+  LIBRARIES ninfer_engine ninfer_core)
+target_include_directories(ninfer_sensenova_loop_9b_plan_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export
+  ${PROJECT_SOURCE_DIR}/src/targets/sensenova_loop_9b/impl
+  ${PROJECT_SOURCE_DIR}/src/targets/sensenova_loop_9b/export)
+
 # Family frontend and one opt-in real-artifact prefix/MTP integration test.
 ninfer_add_test(ninfer_qwen3_6_frontend_test
   SOURCES targets/qwen3_6/test_frontend.cpp
@@ -265,6 +274,7 @@ set(ninfer_op_tests
   gdn_gating
   gdn_gating_proj
   rope
+  mhc
   vision_pos_embed
   sampling
   scalar

@@ -56,10 +56,16 @@ constexpr bool catalog_is_closed() noexcept {
 
 static_assert(catalog_is_closed(), "Q4 LinearSwiGLU routes must be exact, contiguous, and closed");
 
+bool is_loop_9b(const Q4LinearSwiGluProblem& problem) noexcept {
+    return problem.gate_up_rows == 24576 && problem.output_rows == 12288 &&
+           problem.k == 4096 && problem.padded_k == 4096;
+}
+
 bool supported_shape(const Q4LinearSwiGluProblem& problem) noexcept {
-    return problem.gate_up_rows == kShape.gate_up_rows &&
-           problem.output_rows == kShape.output_rows && problem.k == kShape.k &&
-           problem.padded_k == kShape.padded_k;
+    return (problem.gate_up_rows == kShape.gate_up_rows &&
+            problem.output_rows == kShape.output_rows && problem.k == kShape.k &&
+            problem.padded_k == kShape.padded_k) ||
+           is_loop_9b(problem);
 }
 
 template <class Allocator>
@@ -103,6 +109,10 @@ Q4LinearSwiGluPlan q4_linear_swiglu_resolve_plan(const Q4LinearSwiGluProblem& pr
             "q4 linear_swiglu: exact problem or column count is not admitted");
     }
 
+    if (is_loop_9b(problem)) {
+        return {Q4LinearSwiGluScheduleId::Materialized,
+                materialized_workspace_bytes(problem.gate_up_rows, problem.cols)};
+    }
     for (const RouteSpec& route : kRoutes) {
         if (!route.cols.contains(problem.cols)) { continue; }
         Q4LinearSwiGluPlan plan{

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <random>
 #include <string>
 #include <vector>
@@ -25,6 +26,9 @@ constexpr float kVisionTheta = 10'000.0F;
 // than by the cancelled output value.
 constexpr double kRopePointwisePairRtol = 6.9e-3;
 
+std::optional<ops::YarnRopeParameters> g_yarn;
+
+
 struct Geometry {
     const char* label;
     int head_dim;
@@ -33,6 +37,21 @@ struct Geometry {
     int tokens;
     float theta;
 };
+
+double yarn_frequency(int pair, const Geometry& geometry, const ops::YarnRopeParameters& yarn) {
+    const double dim = geometry.rotary_dim;
+    const double theta = geometry.theta;
+    const double original = yarn.original_max_position_embeddings;
+    const double low = std::floor(dim * std::log(original / (yarn.beta_fast * 2.0 * M_PI)) /
+                                  (2.0 * std::log(theta)));
+    const double high = std::ceil(dim * std::log(original / (yarn.beta_slow * 2.0 * M_PI)) /
+                                  (2.0 * std::log(theta)));
+    const double extrapolation = std::pow(theta, -2.0 * pair / dim);
+    const double interpolation = extrapolation / yarn.factor;
+    const double ramp = std::clamp((pair - low) / (high - low), 0.0, 1.0);
+    return interpolation * ramp + extrapolation * (1.0 - ramp);
+}
+
 
 std::size_t dense_elements(int head_dim, int heads, int tokens) {
     return static_cast<std::size_t>(head_dim) * static_cast<std::size_t>(heads) *
@@ -93,13 +112,22 @@ std::vector<double> rope_oracle(const std::vector<float>& input, const std::vect
                     axis     = geometry.axes == 3 ? pair % 3 : 0;
                     exponent = -2.0 * static_cast<double>(pair) / geometry.rotary_dim;
                 }
-                const double frequency = std::pow(static_cast<double>(geometry.theta), exponent);
+                const double frequency = g_yarn.has_value()
+                                             ? yarn_frequency(pair, geometry, *g_yarn)
+                                             : std::pow(static_cast<double>(geometry.theta), exponent);
                 const double phase =
                     static_cast<double>(
                         positions[static_cast<std::size_t>(axis) * geometry.tokens + token]) *
                     frequency;
-                const double cosine  = std::cos(phase);
-                const double sine    = std::sin(phase);
+                const double scaling = g_yarn.has_value()
+                                           ? (g_yarn->attention_factor > 0.0F
+                                                  ? g_yarn->attention_factor
+                                                  : (g_yarn->factor <= 1.0F
+                                                         ? 1.0
+                                                         : 0.1 * std::log(g_yarn->factor) + 1.0))
+                                           : 1.0;
+                const double cosine  = std::cos(phase) * scaling;
+                const double sine    = std::sin(phase) * scaling;
                 const std::size_t lo = dense_index(geometry.head_dim, heads, token, head, pair);
                 const std::size_t hi =
                     dense_index(geometry.head_dim, heads, token, head, pair + half);
@@ -270,7 +298,13 @@ int run_pair_case(const Geometry& geometry, int q_heads, int k_heads, int first_
     q_tensor.nb[2] = static_cast<std::int64_t>(q_stride) * sizeof(std::uint16_t);
     k_tensor.nb[2] = static_cast<std::int64_t>(k_stride) * sizeof(std::uint16_t);
 
-    ops::rope(position_tensor, geometry.rotary_dim, geometry.theta, q_tensor, k_tensor, nullptr);
+    if (g_yarn.has_value()) {
+        ops::rope(position_tensor, geometry.rotary_dim, geometry.theta, *g_yarn, q_tensor,
+                  k_tensor, nullptr);
+    } else {
+        ops::rope(position_tensor, geometry.rotary_dim, geometry.theta, q_tensor, k_tensor,
+                  nullptr);
+    }
     cuda_synchronize();
 
     if (graph) {
@@ -470,6 +504,14 @@ int main() {
     failures += run_single_case({"35b mtp k text", 256, 64, 1, 5, kTextTheta}, 2, 16384, 8);
 
     failures += run_vision_packed_case();
+
+    // YaRN at the release factor: every position, including the original and extended tails.
+    g_yarn = ops::YarnRopeParameters{2.0F, 262144.0F, 32.0F, 1.0F, 0.0F, true};
+    for (const int first : {0, 8192, 262143, 262144, 524281}) {
+        failures += run_pair_case({"9b yarn mrope", 256, 64, 3, 7, kTextTheta}, 16, 4, first);
+    }
+    failures += run_pair_case({"9b yarn text", 256, 64, 1, 1, kTextTheta}, 16, 4, 524287);
+    g_yarn.reset();
 
     // DFlash proposal consumes 2..16 tokens; context append uses the single-K form.
     failures += run_pair_case({"35b dflash proposal", 128, 128, 1, 16, kTextTheta}, 32, 8, 262'128);

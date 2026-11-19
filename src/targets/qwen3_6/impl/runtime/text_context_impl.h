@@ -290,11 +290,12 @@ void TextContext::bind() {
                     &source.final_norm};
     }
 
-    for (int layer = 0; layer < kCfg.n_layers; ++layer) {
-        if (ModelConfig::is_full(layer)) {
-            FullLayerW& out = full_[static_cast<std::size_t>(ModelConfig::full_idx(layer))];
-            const auto& source =
-                weights_.full_layers[static_cast<std::size_t>(ModelConfig::full_idx(layer))];
+    for (int physical = 0; physical < kCfg.physical_layers; ++physical) {
+        if (TextConfig::is_full_attention(physical)) {
+            const std::size_t pidx =
+                static_cast<std::size_t>(ModelConfig::physical_full_idx(physical));
+            FullLayerW& out    = full_[pidx];
+            const auto& source = weights_.full_layers[pidx];
             out.input_norm     = &source.input_norm;
             out.projection     = &source.projection;
             out.o_proj         = &source.output;
@@ -303,16 +304,17 @@ void TextContext::bind() {
             out.post_attn_norm = &source.post_attention_norm;
             out.mlp            = bind_mlp(source.post_mixer);
         } else {
-            const std::size_t gidx = static_cast<std::size_t>(ModelConfig::gdn_idx(layer));
-            GdnLayerW& out         = gdn_[gidx];
-            const auto& source     = weights_.gdn_layers[gidx];
-            out.input_norm         = &source.input_norm;
-            out.projection         = &source.projection;
-            out.conv1d             = &source.convolution;
-            out.gdn_norm           = &source.norm;
-            out.out_proj           = &source.output;
-            out.post_attn_norm     = &source.post_attention_norm;
-            out.mlp                = bind_mlp(source.post_mixer);
+            const std::size_t gidx =
+                static_cast<std::size_t>(ModelConfig::physical_gdn_idx(physical));
+            GdnLayerW& out     = gdn_[gidx];
+            const auto& source = weights_.gdn_layers[gidx];
+            out.input_norm     = &source.input_norm;
+            out.projection     = &source.projection;
+            out.conv1d         = &source.convolution;
+            out.gdn_norm       = &source.norm;
+            out.out_proj       = &source.output;
+            out.post_attn_norm = &source.post_attention_norm;
+            out.mlp            = bind_mlp(source.post_mixer);
         }
     }
 }
@@ -383,7 +385,15 @@ void TextContext::mtp_forward_tail(Tensor& x, const Tensor& ah, const Tensor& po
     ops::rmsnorm(q, *mtp_.q_norm, kCfg.rms_eps, true, qn, s);
     ops::rmsnorm(k, *mtp_.k_norm, kCfg.rms_eps, true, kn, s);
     Tensor rope_for_op = active_sequence_batch_ != 0 ? rope_positions.view({T}) : rope_positions;
-    ops::rope(rope_for_op, kCfg.rotary_dim, kCfg.rope_theta, qn, kn, s);
+    if constexpr (Variant::yarn_rope) {
+        ops::rope(rope_for_op, kCfg.rotary_dim, kCfg.rope_theta,
+                  ops::YarnRopeParameters{Variant::yarn_factor, Variant::yarn_original_max,
+                                          Variant::yarn_beta_fast, Variant::yarn_beta_slow,
+                                          Variant::yarn_attention_factor, true},
+                  qn, kn, s);
+    } else {
+        ops::rope(rope_for_op, kCfg.rotary_dim, kCfg.rope_theta, qn, kn, s);
+    }
 
     Tensor a = results.attention.view({kCfg.head_dim, kCfg.n_q, T});
     if (active_sequence_batch_ != 0) {
@@ -815,7 +825,8 @@ void TextContext::mtp_propose_batch(const Tensor& hidden, Tensor& logits, Tensor
     proposal_argmax(hidden, logits, draft_tokens);
 }
 
-void TextContext::attn_mix(const FullLayerW& w, Tensor& x, int fidx, Phase ph) {
+void TextContext::attn_mix(const FullLayerW& w, Tensor& x, int fidx, Phase ph,
+                           Tensor* output) {
     cudaStream_t s = ctx_.stream;
     const int T    = x.ne[1];
     if (active_causal_attention_envelope_ == nullptr) {
@@ -847,7 +858,15 @@ void TextContext::attn_mix(const FullLayerW& w, Tensor& x, int fidx, Phase ph) {
     const Tensor& rope_positions =
         active_rope_positions_ != nullptr ? *active_rope_positions_ : io_.rope_pos;
     Tensor rope_for_op = active_sequence_batch_ != 0 ? rope_positions.view({T}) : rope_positions;
-    ops::rope(rope_for_op, kCfg.rotary_dim, kCfg.rope_theta, qn, kn, s);
+    if constexpr (Variant::yarn_rope) {
+        ops::rope(rope_for_op, kCfg.rotary_dim, kCfg.rope_theta,
+                  ops::YarnRopeParameters{Variant::yarn_factor, Variant::yarn_original_max,
+                                          Variant::yarn_beta_fast, Variant::yarn_beta_slow,
+                                          Variant::yarn_attention_factor, true},
+                  qn, kn, s);
+    } else {
+        ops::rope(rope_for_op, kCfg.rotary_dim, kCfg.rope_theta, qn, kn, s);
+    }
 
     Tensor a = results.attention.view({kCfg.head_dim, kCfg.n_q, T});
     const Tensor& kv_table_rows =
@@ -875,10 +894,15 @@ void TextContext::attn_mix(const FullLayerW& w, Tensor& x, int fidx, Phase ph) {
     }
     ops::sigmoid_mul(gate, a, s);
 
-    Variant::attention_output_projection(a.view({kCfg.q_size, T}), *w.o_proj, x, ph, work_, s);
+    if (output == nullptr) {
+        Variant::attention_output_projection(a.view({kCfg.q_size, T}), *w.o_proj, x, ph, work_, s);
+    } else {
+        ops::linear(a.view({kCfg.q_size, T}), *w.o_proj, *output, s);
+    }
 }
 
-void TextContext::gdn_mix(const GdnLayerW& w, Tensor& x, int gidx, Phase ph) {
+void TextContext::gdn_mix(const GdnLayerW& w, Tensor& x, int gidx, Phase ph,
+                          Tensor* output) {
     cudaStream_t s = ctx_.stream;
     const int T    = x.ne[1];
 
@@ -983,82 +1007,190 @@ void TextContext::gdn_mix(const GdnLayerW& w, Tensor& x, int gidx, Phase ph) {
         {kCfg.gdn_v_dim, kCfg.gdn_v_heads, T});
     ops::gated_rmsnorm(o, *w.gdn_norm, z, kCfg.rms_eps, on, s);
 
-    Variant::gdn_output_projection(on.view({kCfg.value_dim, T}), *w.out_proj, x, ph, work_, s);
+    if (output == nullptr) {
+        Variant::gdn_output_projection(on.view({kCfg.value_dim, T}), *w.out_proj, x, ph, work_, s);
+    } else {
+        ops::linear(on.view({kCfg.value_dim, T}), *w.out_proj, *output, s);
+    }
 }
 
-ops::SparseMoeHints TextContext::next_projection_hints(int layer) const {
-    // Name the next layer's projection codes so this layer's MoE D4 epilogue can warm L2 for
-    // them. The last layer names nothing. A pure hint: the value never reaches arithmetic.
-    const int next = layer + 1;
+ops::SparseMoeHints TextContext::next_projection_hints(int slot) const {
+    // Name the next slot's physical projection codes so this layer's MoE D4 epilogue can warm L2
+    // for them. The last slot names nothing. A pure hint: the value never reaches arithmetic.
+    const int next = slot + 1;
     if (next >= kCfg.n_layers) { return {}; }
+    const int physical = ModelConfig::physical_of(next);
     if (ModelConfig::is_full(next)) {
         return Variant::projection_prefetch_hints(
-            *full_.at(static_cast<std::size_t>(ModelConfig::full_idx(next))).projection);
+            *full_.at(static_cast<std::size_t>(ModelConfig::physical_full_idx(physical)))
+                 .projection);
     }
     return Variant::projection_prefetch_hints(
-        *gdn_.at(static_cast<std::size_t>(ModelConfig::gdn_idx(next))).projection);
+        *gdn_.at(static_cast<std::size_t>(ModelConfig::physical_gdn_idx(physical))).projection);
+}
+
+template <class Payload>
+void dense_mlp_output(const Payload& payload, const Tensor& input, Tensor& output,
+                      std::int32_t intermediate, std::int32_t tokens, WorkspaceArena& workspace,
+                      cudaStream_t stream) {
+    if constexpr (requires { payload.gate_up; payload.down; }) {
+        auto scope        = workspace.scope();
+        Tensor activation = workspace.alloc(DType::BF16, {intermediate, tokens});
+        ops::linear_swiglu(input, payload.gate_up, activation, workspace, stream);
+        ops::linear(activation, payload.down, output, stream);
+    } else {
+        throw std::logic_error("raw MLP output is not implemented for a sparse MoE post-mixer");
+    }
 }
 
 void TextContext::mlp_tail(const Tensor* post_norm, const MlpW& m, Tensor& x, Phase ph,
-                           const ops::SparseMoeHints& hints) {
+                           const ops::SparseMoeHints& hints, Tensor* output) {
     cudaStream_t s = ctx_.stream;
     const int T    = x.ne[1];
     Tensor h       = workspace_recipe::post_mixer_hidden<TextConfig>(work_, T);
-    ops::rmsnorm(x, *post_norm, kCfg.rms_eps, true, h, s);
+    if (post_norm != nullptr) {
+        ops::rmsnorm(x, *post_norm, kCfg.rms_eps, true, h, s);
+    } else {
+        h = x;
+    }
 
-    Variant::post_mixer(h, *m.payload, x, ph, hints, work_, s);
+    if (output == nullptr) {
+        Variant::post_mixer(h, *m.payload, x, ph, hints, work_, s);
+        return;
+    }
+    dense_mlp_output(*m.payload, h, *output, kCfg.intermediate, T, work_, s);
 }
 
 template <class Tap>
 void TextContext::run_layers(Tensor& x, Phase ph, Tap& tap) {
     const bool prefill = ph == Phase::Prefill;
-    for (int layer = 0; layer < kCfg.n_layers; ++layer) {
-        if (ModelConfig::is_full(layer)) {
-            const int fidx         = ModelConfig::full_idx(layer);
-            const FullLayerW& full = full_.at(static_cast<std::size_t>(fidx));
+    cudaStream_t stream = ctx_.stream;
+    Tensor mhc_streams;
+    Tensor mhc_merged;
+    Tensor mhc_branch;
+    Tensor mhc_hidden;
+    Tensor mhc_post;
+    Tensor mhc_mix;
+    if constexpr (Variant::has_mhc) {
+        auto buffers = workspace_recipe::mhc<TextConfig>(work_, x.ne[1]);
+        mhc_streams  = buffers.streams;
+        mhc_merged   = buffers.merged;
+        mhc_branch   = buffers.branch;
+        mhc_hidden   = buffers.hidden;
+        mhc_post     = buffers.post;
+        mhc_mix      = buffers.mix;
+    }
+
+    for (int slot = 0; slot < kCfg.n_layers; ++slot) {
+        const int physical = ModelConfig::physical_of(slot);
+        if constexpr (Variant::has_mhc) {
+            if (physical >= Variant::mhc_start && physical < Variant::mhc_end) {
+                if (physical == Variant::mhc_start) { ops::mhc_enter(x, mhc_streams, stream); }
+                const int state_index =
+                    ModelConfig::is_full(slot) ? ModelConfig::full_idx(slot)
+                                               : ModelConfig::gdn_idx(slot);
+                nvtx::ScopedRange layer_range(
+                    prefill ? nvtx::Name::PrefillLayerFull : nvtx::Name::VerifyLayerFull,
+                    nvtx::Category::Attention, static_cast<std::uint64_t>(slot));
+
+                const auto& attention_router =
+                    weights_.mhc_attn.at(static_cast<std::size_t>(physical));
+                ops::mhc_router(mhc_streams, attention_router.weight, attention_router.bias,
+                                Variant::mhc_iterations, Variant::mhc_pre_scale, mhc_branch,
+                                mhc_post, mhc_mix, stream);
+                if (ModelConfig::is_full(slot)) {
+                    const FullLayerW& full = full_.at(static_cast<std::size_t>(
+                        ModelConfig::physical_full_idx(physical)));
+                    {
+                        auto mixer_scope = work_.scope();
+                        attn_mix(full, mhc_branch, state_index, ph, &mhc_hidden);
+                    }
+                    ops::mhc_merge(mhc_streams, mhc_hidden, mhc_post, mhc_mix, mhc_merged, stream);
+                    const auto& ffn_router =
+                        weights_.mhc_ffn.at(static_cast<std::size_t>(physical));
+                    ops::mhc_router(mhc_merged, ffn_router.weight, ffn_router.bias,
+                                    Variant::mhc_iterations, Variant::mhc_pre_scale, mhc_branch,
+                                    mhc_post, mhc_mix, stream);
+                    ops::rmsnorm(mhc_branch, *full.post_attn_norm, kCfg.rms_eps, true, mhc_hidden,
+                                 stream);
+                    {
+                        auto mlp_scope = work_.scope();
+                        mlp_tail(nullptr, full.mlp, mhc_hidden, ph, next_projection_hints(slot),
+                                 &mhc_branch);
+                    }
+                } else {
+                    const GdnLayerW& gdn = gdn_.at(static_cast<std::size_t>(
+                        ModelConfig::physical_gdn_idx(physical)));
+                    {
+                        auto mixer_scope = work_.scope();
+                        gdn_mix(gdn, mhc_branch, state_index, ph, &mhc_hidden);
+                    }
+                    ops::mhc_merge(mhc_streams, mhc_hidden, mhc_post, mhc_mix, mhc_merged, stream);
+                    const auto& ffn_router =
+                        weights_.mhc_ffn.at(static_cast<std::size_t>(physical));
+                    ops::mhc_router(mhc_merged, ffn_router.weight, ffn_router.bias,
+                                    Variant::mhc_iterations, Variant::mhc_pre_scale, mhc_branch,
+                                    mhc_post, mhc_mix, stream);
+                    ops::rmsnorm(mhc_branch, *gdn.post_attn_norm, kCfg.rms_eps, true, mhc_hidden,
+                                 stream);
+                    {
+                        auto mlp_scope = work_.scope();
+                        mlp_tail(nullptr, gdn.mlp, mhc_hidden, ph, next_projection_hints(slot),
+                                 &mhc_branch);
+                    }
+                }
+                ops::mhc_merge(mhc_merged, mhc_branch, mhc_post, mhc_mix, mhc_streams, stream);
+                if (physical == Variant::mhc_end - 1) { ops::mhc_leave(mhc_streams, x, stream); }
+                continue;
+            }
+        }
+        if (ModelConfig::is_full(slot)) {
+            const int fidx = ModelConfig::full_idx(slot);
+            const FullLayerW& full =
+                full_.at(static_cast<std::size_t>(ModelConfig::physical_full_idx(physical)));
             nvtx::ScopedRange layer_range(
                 prefill ? nvtx::Name::PrefillLayerFull : nvtx::Name::VerifyLayerFull,
-                nvtx::Category::Attention, static_cast<std::uint64_t>(layer));
+                nvtx::Category::Attention, static_cast<std::uint64_t>(slot));
             {
                 nvtx::ScopedRange mixer_range(
                     prefill ? nvtx::Name::PrefillAttention : nvtx::Name::VerifyAttention,
-                    nvtx::Category::Attention, static_cast<std::uint64_t>(layer));
+                    nvtx::Category::Attention, static_cast<std::uint64_t>(slot));
                 auto mixer_scope = work_.scope();
                 attn_mix(full, x, fidx, ph);
             }
             {
                 nvtx::ScopedRange post_mixer_range(
                     prefill ? nvtx::Name::PrefillPostMixer : nvtx::Name::VerifyPostMixer,
-                    nvtx::Category::PostMixer, static_cast<std::uint64_t>(layer));
+                    nvtx::Category::PostMixer, static_cast<std::uint64_t>(slot));
                 auto mlp_scope = work_.scope();
-                mlp_tail(full.post_attn_norm, full.mlp, x, ph, next_projection_hints(layer));
-                if constexpr (Tap::enabled) { tap.capture_layer(layer, x, ctx_.stream); }
+                mlp_tail(full.post_attn_norm, full.mlp, x, ph, next_projection_hints(slot));
+                if constexpr (Tap::enabled) { tap.capture_layer(slot, x, ctx_.stream); }
             }
         } else {
-            const int gidx       = ModelConfig::gdn_idx(layer);
-            const GdnLayerW& gdn = gdn_.at(static_cast<std::size_t>(gidx));
+            const int gidx = ModelConfig::gdn_idx(slot);
+            const GdnLayerW& gdn =
+                gdn_.at(static_cast<std::size_t>(ModelConfig::physical_gdn_idx(physical)));
             nvtx::ScopedRange layer_range(prefill ? nvtx::Name::PrefillLayerGdn
                                                   : nvtx::Name::VerifyLayerGdn,
-                                          nvtx::Category::Gdn, static_cast<std::uint64_t>(layer));
+                                          nvtx::Category::Gdn, static_cast<std::uint64_t>(slot));
             {
                 nvtx::ScopedRange mixer_range(
                     prefill ? nvtx::Name::PrefillGdn : nvtx::Name::VerifyGdn, nvtx::Category::Gdn,
-                    static_cast<std::uint64_t>(layer));
+                    static_cast<std::uint64_t>(slot));
                 auto mixer_scope = work_.scope();
                 gdn_mix(gdn, x, gidx, ph);
             }
             {
                 nvtx::ScopedRange post_mixer_range(
                     prefill ? nvtx::Name::PrefillPostMixer : nvtx::Name::VerifyPostMixer,
-                    nvtx::Category::PostMixer, static_cast<std::uint64_t>(layer));
+                    nvtx::Category::PostMixer, static_cast<std::uint64_t>(slot));
                 auto mlp_scope = work_.scope();
-                mlp_tail(gdn.post_attn_norm, gdn.mlp, x, ph, next_projection_hints(layer));
-                if constexpr (Tap::enabled) { tap.capture_layer(layer, x, ctx_.stream); }
+                mlp_tail(gdn.post_attn_norm, gdn.mlp, x, ph, next_projection_hints(slot));
+                if constexpr (Tap::enabled) { tap.capture_layer(slot, x, ctx_.stream); }
             }
         }
     }
 }
-
 void TextContext::run_layers(Tensor& x, Phase ph) {
     NullTap tap;
     run_layers(x, ph, tap);

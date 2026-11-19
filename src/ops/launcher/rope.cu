@@ -4,7 +4,10 @@
 #include "core/device.h" // CUDA_CHECK
 #include "ops/kernel/rope.cuh"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
@@ -167,7 +170,9 @@ bool launch_fixed_single_dispatch(const Tensor& positions, int rotary_dim, float
 }
 
 void launch_generic(const Tensor& positions, int rotary_dim, float theta, Tensor* q, Tensor* k,
-                    cudaStream_t stream) {
+                    cudaStream_t stream, float yarn_factor = 1.0F, float yarn_low = 0.0F,
+                    float yarn_high = 1.0F, float yarn_attention_scale = 1.0F,
+                    bool yarn_enabled = false) {
     constexpr int block = 128;
     Tensor& sample      = q != nullptr ? *q : *k;
     const int tokens    = sample.ne[2];
@@ -176,7 +181,48 @@ void launch_generic(const Tensor& positions, int rotary_dim, float theta, Tensor
         q == nullptr ? nullptr : static_cast<__nv_bfloat16*>(q->data),
         k == nullptr ? nullptr : static_cast<__nv_bfloat16*>(k->data), sample.ne[0], rotary_dim,
         theta, q == nullptr ? 0 : q->ne[1], k == nullptr ? 0 : k->ne[1], tokens, token_stride(q),
-        token_stride(k));
+        token_stride(k), yarn_factor, yarn_low, yarn_high, yarn_attention_scale,
+        yarn_enabled ? 1 : 0);
+}
+
+struct YarnHostParameters {
+    float factor;
+    float low;
+    float high;
+    float attention_scale;
+};
+
+YarnHostParameters yarn_host_parameters(int rotary_dim, float theta,
+                                        const YarnRopeParameters& yarn) {
+    if (!(theta > 0.0F) || !std::isfinite(theta) || rotary_dim <= 0 || rotary_dim % 2 != 0 ||
+        rotary_dim > 2 * kRopeMaxHalf) {
+        throw std::invalid_argument("YaRN RoPE dimensions are invalid");
+    }
+    if (!(yarn.factor > 0.0F) || !std::isfinite(yarn.factor) ||
+        !(yarn.original_max_position_embeddings > 0.0F) ||
+        !std::isfinite(yarn.original_max_position_embeddings) || !(yarn.beta_fast > 0.0F) ||
+        !(yarn.beta_slow > 0.0F)) {
+        throw std::invalid_argument("YaRN RoPE parameters are invalid");
+    }
+    const auto correction_dim = [&](float rotations) {
+        return static_cast<float>(rotary_dim) *
+               std::log(yarn.original_max_position_embeddings / (rotations * 2.0F * 3.14159265358979323846F)) /
+               (2.0F * std::log(theta));
+    };
+    float low  = correction_dim(yarn.beta_fast);
+    float high = correction_dim(yarn.beta_slow);
+    if (yarn.truncate) {
+        low  = std::floor(low);
+        high = std::ceil(high);
+    }
+    low  = std::max(low, 0.0F);
+    high = std::min(high, static_cast<float>(rotary_dim - 1));
+    if (low == high) { high = low + 0.001F; }
+    const float attention_scale =
+        yarn.attention_factor > 0.0F
+            ? yarn.attention_factor
+            : (yarn.factor <= 1.0F ? 1.0F : 0.1F * std::log(yarn.factor) + 1.0F);
+    return {yarn.factor, low, high, attention_scale};
 }
 
 } // namespace
@@ -194,6 +240,28 @@ void rope_single_launch(const Tensor& positions, int rotary_dim, float theta, Te
     if (!launch_fixed_single_dispatch(positions, rotary_dim, theta, x, stream)) {
         launch_generic(positions, rotary_dim, theta, &x, nullptr, stream);
     }
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void rope_yarn_launch(const Tensor& positions, int rotary_dim, float theta,
+                      const YarnRopeParameters& yarn, Tensor& q, Tensor& k, cudaStream_t stream) {
+    if (positions.ne[1] != 1 && positions.ne[1] != 3) {
+        throw std::invalid_argument("YaRN RoPE requires one or three MRoPE axes");
+    }
+    const YarnHostParameters host = yarn_host_parameters(rotary_dim, theta, yarn);
+    launch_generic(positions, rotary_dim, theta, &q, &k, stream, host.factor, host.low, host.high,
+                   host.attention_scale, true);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void rope_single_yarn_launch(const Tensor& positions, int rotary_dim, float theta,
+                             const YarnRopeParameters& yarn, Tensor& x, cudaStream_t stream) {
+    if (positions.ne[1] != 1 && positions.ne[1] != 3) {
+        throw std::invalid_argument("YaRN RoPE requires one or three MRoPE axes");
+    }
+    const YarnHostParameters host = yarn_host_parameters(rotary_dim, theta, yarn);
+    launch_generic(positions, rotary_dim, theta, &x, nullptr, stream, host.factor, host.low,
+                   host.high, host.attention_scale, true);
     CUDA_CHECK(cudaGetLastError());
 }
 

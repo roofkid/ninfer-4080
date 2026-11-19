@@ -47,6 +47,17 @@ struct Variant {
     static constexpr std::uint32_t maximum_dflash_draft_tokens = kMaximumDFlashDraftTokens;
     static constexpr std::uint32_t maximum_context             = kNativeContext;
     static constexpr bool supports_dflash                      = DFlashConfig::supported;
+    static constexpr bool has_mhc                              = false;
+    static constexpr int mhc_start                             = 0;
+    static constexpr int mhc_end                               = 0;
+    static constexpr int mhc_iterations                        = 20;
+    static constexpr float mhc_pre_scale                        = 1.0F;
+    static constexpr bool yarn_rope                            = false;
+    static constexpr float yarn_factor                         = 1.0F;
+    static constexpr float yarn_original_max                   = 1.0F;
+    static constexpr float yarn_beta_fast                      = 32.0F;
+    static constexpr float yarn_beta_slow                       = 1.0F;
+    static constexpr float yarn_attention_factor                = 0.0F;
     static constexpr std::int32_t draft_head_rows              = 131072;
 
     static void attention_projection(const Tensor& hidden,

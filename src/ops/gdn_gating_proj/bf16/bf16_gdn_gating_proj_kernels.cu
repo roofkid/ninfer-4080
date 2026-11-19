@@ -567,6 +567,59 @@ bool bf16_gdn_gating_proj_35_mma_split16_launch(Bf16GdnGatingTokenVariant varian
         stream, multiprocessor_count);
 }
 
+bool bf16_gdn_gating_proj_9b_mma_split16_launch(Bf16GdnGatingTokenVariant variant, const Tensor& x,
+                                                const Weight& a_weight, const Weight& b_weight,
+                                                const Tensor& A_log, const Tensor& dt_bias,
+                                                void* workspace, Tensor& g, Tensor& beta,
+                                                std::int32_t multiprocessor_count,
+                                                cudaStream_t stream) {
+    return launch_bf16_prefill_mma<Bf16Gdn9BGeometry, 16, 8>(
+        variant, x, nullptr, 0.0F, nullptr, a_weight, b_weight, A_log, dt_bias, workspace, g, beta,
+        stream, multiprocessor_count);
+}
+
+bool bf16_gdn_gating_proj_9b_mma_split8_launch(Bf16GdnGatingTokenVariant variant, const Tensor& x,
+                                               const Weight& a_weight, const Weight& b_weight,
+                                               const Tensor& A_log, const Tensor& dt_bias,
+                                               void* workspace, Tensor& g, Tensor& beta,
+                                               std::int32_t multiprocessor_count,
+                                               cudaStream_t stream) {
+    return launch_bf16_prefill_mma<Bf16Gdn9BGeometry, 8, 8>(
+        variant, x, nullptr, 0.0F, nullptr, a_weight, b_weight, A_log, dt_bias, workspace, g, beta,
+        stream, multiprocessor_count);
+}
+
+bool bf16_gdn_gating_proj_9b_mma_split4_launch(Bf16GdnGatingTokenVariant variant, const Tensor& x,
+                                               const Weight& a_weight, const Weight& b_weight,
+                                               const Tensor& A_log, const Tensor& dt_bias,
+                                               void* workspace, Tensor& g, Tensor& beta,
+                                               std::int32_t multiprocessor_count,
+                                               cudaStream_t stream) {
+    return launch_bf16_prefill_mma<Bf16Gdn9BGeometry, 4, 8>(
+        variant, x, nullptr, 0.0F, nullptr, a_weight, b_weight, A_log, dt_bias, workspace, g, beta,
+        stream, multiprocessor_count);
+}
+
+bool bf16_gdn_gating_proj_9b_mma_split2_launch(Bf16GdnGatingTokenVariant variant, const Tensor& x,
+                                               const Weight& a_weight, const Weight& b_weight,
+                                               const Tensor& A_log, const Tensor& dt_bias,
+                                               void* workspace, Tensor& g, Tensor& beta,
+                                               std::int32_t multiprocessor_count,
+                                               cudaStream_t stream) {
+    return launch_bf16_prefill_mma<Bf16Gdn9BGeometry, 2, 8>(
+        variant, x, nullptr, 0.0F, nullptr, a_weight, b_weight, A_log, dt_bias, workspace, g, beta,
+        stream, multiprocessor_count);
+}
+
+void bf16_gdn_gating_proj_9b_mma_unsplit_launch(Bf16GdnGatingTokenVariant variant, const Tensor& x,
+                                                const Weight& a_weight, const Weight& b_weight,
+                                                const Tensor& A_log, const Tensor& dt_bias,
+                                                Tensor& g, Tensor& beta, cudaStream_t stream) {
+    (void)launch_bf16_prefill_mma<Bf16Gdn9BGeometry, 1, 8>(
+        variant, x, nullptr, 0.0F, nullptr, a_weight, b_weight, A_log, dt_bias, nullptr, g, beta,
+        stream);
+}
+
 bool bf16_gdn_gating_proj_35_mma_split8_launch(Bf16GdnGatingTokenVariant variant, const Tensor& x,
                                                const Weight& a_weight, const Weight& b_weight,
                                                const Tensor& A_log, const Tensor& dt_bias,

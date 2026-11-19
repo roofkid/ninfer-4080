@@ -49,7 +49,7 @@ constexpr std::int32_t bf16_gdn_resident_ctas_per_sm(std::int32_t heads, std::in
             return 0;
         }
     }
-    if (heads == 32 && input_rows == 2048) {
+    if (heads == 32 && (input_rows == 2048 || input_rows == 4096)) {
         switch (split_k) {
         case 32:
             return 2;

@@ -117,7 +117,7 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
     PersistentLayout out;
     out.decoder = qwen3_6::plan_decoder_state(
         builder, qwen3_6::DecoderStateSpec{
-                     .full_attention_layers     = TextConfig::full_attention_layers(),
+                     .full_attention_layers     = TextConfig::full_attention_slots,
                      .mtp_layers                = TextConfig::mtp_layers,
                      .capacity                  = plan.capacity,
                      .kv_heads                  = TextConfig::kv_heads,
@@ -131,7 +131,7 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
     qwen3_6::StateImageSpec state_image_spec{
         .linear =
             {
-                .layers         = TextConfig::gdn_layers(),
+                .layers         = TextConfig::gdn_slots,
                 .conv_channels  = TextConfig::convolution_dim,
                 .conv_width     = TextConfig::gdn_conv_state_width,
                 .value_heads    = TextConfig::gdn_value_heads,
@@ -156,7 +156,7 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
     if (plan.speculative_backend != SpeculativeBackend::None) {
         out.replay_records = plan_gdn_replay_records(
             builder, GdnReplayRecordSpec{
-                         .layers          = TextConfig::gdn_layers(),
+                         .layers          = TextConfig::gdn_slots,
                          .record_capacity = static_cast<std::int32_t>(plan.max_concurrency),
                          // MTP records its widest verify round (V+1); DFlash verifies K+1.
                          .width = static_cast<std::int32_t>(
@@ -339,6 +339,9 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                  std::int32_t batch_size, std::int32_t min_width,
                                  std::int32_t max_width,
                                  ops::CausalAttentionExecutionEnvelope envelope) {
+        if constexpr (Variant::has_mhc) {
+            (void)workspace_recipe::mhc<TextConfig>(layout, last);
+        }
         attention_stage(layout, first, last, phase, batch_size, min_width, max_width, envelope);
         gdn_stage(layout, first, last, phase, path, batch_size, min_width, max_width);
         post_mixer_stage(layout, first, last, phase);

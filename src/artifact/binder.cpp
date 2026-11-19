@@ -53,8 +53,22 @@ ObjectHandle Binder::require_tensor(std::string_view name, NumericFormat format,
     }
     if (tensor->format != format || tensor->layout != layout ||
         !std::equal(tensor->shape.begin(), tensor->shape.end(), shape.begin(), shape.end())) {
-        throw ArtifactError("tensor descriptor does not match target contract: " +
-                            std::string(name));
+        std::string detail = "tensor descriptor does not match target contract: " +
+                             std::string(name) + " (stored " +
+                             std::string(format_name(tensor->format)) + "/" +
+                             std::string(layout_name(tensor->layout)) + " [";
+        for (std::size_t i = 0; i < tensor->shape.size(); ++i) {
+            if (i != 0) { detail += ","; }
+            detail += std::to_string(tensor->shape[i]);
+        }
+        detail += "], expected " + std::string(format_name(format)) + "/" +
+                  std::string(layout_name(layout)) + " [";
+        for (std::size_t i = 0; i < shape.size(); ++i) {
+            if (i != 0) { detail += ","; }
+            detail += std::to_string(shape[i]);
+        }
+        detail += "])";
+        throw ArtifactError(detail);
     }
     return handle;
 }

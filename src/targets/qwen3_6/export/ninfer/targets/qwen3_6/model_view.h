@@ -52,6 +52,11 @@ struct MtpWeights {
     Tensor final_norm;
 };
 
+struct MhcRouterWeights {
+    Tensor weight;
+    Tensor bias;
+};
+
 struct OptimizedProposalWeights {
     Weight head;
     Tensor token_ids;
@@ -127,6 +132,10 @@ struct ModelView {
     Weight token_embedding;
     std::array<FullLayer, FullAttentionLayers> full_layers;
     std::array<GdnLayer, GdnLayers> gdn_layers;
+    // mHC routers are physical-layer indexed; only the target's declared [start,end) range is
+    // populated. Ordinary variants leave both arrays empty.
+    std::array<MhcRouterWeights, FullAttentionLayers + GdnLayers> mhc_attn;
+    std::array<MhcRouterWeights, FullAttentionLayers + GdnLayers> mhc_ffn;
     Tensor final_norm;
     Weight output_head;
     StartupFeatures features;

@@ -24,6 +24,12 @@ void q5_linear_add_gemv_residual_launch(const Tensor& x, const Weight& w, Tensor
     } else if (w.n == 5120 && w.k == 17408 && w.padded_shape[1] == 17408) {
         q5_rowsplit_gemv_residual_launch_kernel<5120, 17408, 16, 2, false>(xp, codes, high, scales,
                                                                            out, stream);
+    } else if (w.n == 4096 && w.k == 4096 && w.padded_shape[1] == 4096) {
+        q5_rowsplit_gemv_residual_launch_kernel<4096, 4096, 16, 2, true>(xp, codes, high, scales,
+                                                                         out, stream);
+    } else if (w.n == 4096 && w.k == 12288 && w.padded_shape[1] == 12288) {
+        q5_rowsplit_gemv_residual_launch_kernel<4096, 12288, 16, 2, false>(xp, codes, high,
+                                                                           scales, out, stream);
     } else {
         throw std::invalid_argument("q5 linear_add GEMV: unsupported exact shape");
     }

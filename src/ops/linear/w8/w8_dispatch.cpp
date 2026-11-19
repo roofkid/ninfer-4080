@@ -2,6 +2,7 @@
 #include "ops/linear/w8/w8_feature.h"
 
 #include <stdexcept>
+#include <string>
 
 namespace ninfer::ops::detail {
 
@@ -9,6 +10,13 @@ W8Launch select_w8_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
     if (t <= 0) { throw std::invalid_argument("w8 linear: unsupported shape or T"); }
 
     switch (k) {
+    case 8192:
+        if (n == 4096) {
+            if (t <= 4) { return launch_w8_simt_r8_c4; }
+            if (t <= 16) { return launch_w8_simt_r8_c8; }
+            return launch_w8_mma_r64_c128;
+        }
+        break;
     case 10240:
         if (n == 5120) {
             if (t <= 48) { return launch_w8_small_t; }
@@ -52,6 +60,13 @@ W8Launch select_w8_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
             return launch_w8_mma_r64_c128;
         }
         break;
+    case 12288:
+        if (n == 4096) {
+            if (t <= 4) { return launch_w8_simt_r8_c4; }
+            if (t <= 16) { return launch_w8_simt_r8_c8; }
+            return launch_w8_mma_r64_c128;
+        }
+        break;
     case 17408:
         if (n == 5120) {
             if (t <= 48) { return launch_w8_small_t; }
@@ -71,6 +86,12 @@ W8Launch select_w8_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
             if (t <= 48) { return launch_w8_small_t; }
             if (t <= 56) { return launch_w8_simt_r8_c4; }
             if (t <= 895) { return launch_w8_mma_r32_c128; }
+            return launch_w8_mma_r64_c128;
+        }
+        // SenseNova-Loop-9B MTP matrices share hidden width 4096.
+        if (n == 1024 || n == 4096 || n == 10240 || n == 12288 || n == 24576) {
+            if (t <= 4) { return launch_w8_simt_r8_c4; }
+            if (t <= 16) { return launch_w8_simt_r8_c8; }
             return launch_w8_mma_r64_c128;
         }
         break;
@@ -107,6 +128,10 @@ W8Launch select_w8_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
         case 5120:
             if (t <= 4) { return launch_w8_simt_r8_c4; }
             if (t == 5) { return launch_w8_simt_r8_c8; }
+            return launch_w8_mma_r64_c128;
+        case 4096:
+            if (t <= 4) { return launch_w8_simt_r8_c4; }
+            if (t <= 16) { return launch_w8_simt_r8_c8; }
             return launch_w8_mma_r64_c128;
         default:
             break;
@@ -155,7 +180,8 @@ W8Launch select_w8_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
         break;
     }
 
-    throw std::invalid_argument("w8 linear: unsupported shape or T");
+    throw std::invalid_argument("w8 linear: unsupported shape or T (n=" + std::to_string(n) +
+                                ", k=" + std::to_string(k) + ", t=" + std::to_string(t) + ")");
 }
 
 W8Launch select_w8_launch(std::int32_t n, std::int32_t k, std::int32_t t, LinearPolicy policy) {

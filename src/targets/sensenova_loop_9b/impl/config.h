@@ -1,0 +1,138 @@
+#pragma once
+
+#include <ninfer/targets/qwen3_6/execution_plan.h>
+#include <ninfer/targets/qwen3_6/frontend.h>
+#include <ninfer/targets/qwen3_6/hybrid_topology.h>
+#include <ninfer/targets/qwen3_6/vision.h>
+
+#include <array>
+#include <cstdint>
+#include <ninfer/types.h>
+
+namespace ninfer::targets::sensenova_loop_9b::detail {
+
+struct TextConfig {
+    static constexpr int hidden          = 4096;
+    static constexpr int physical_layers = 32;
+    static constexpr int layers          = physical_layers;
+    static constexpr int intermediate    = 12288;
+
+    static constexpr int output_rows  = 248320;
+    static constexpr int token_domain = static_cast<int>(qwen3_6::kTokenDomain);
+
+    static constexpr int gdn_conv_kernel      = 4;
+    static constexpr int gdn_conv_state_width = gdn_conv_kernel - 1;
+    static constexpr int gdn_key_heads        = 16;
+    static constexpr int gdn_key_head_dim     = 128;
+    static constexpr int gdn_value_heads      = 32;
+    static constexpr int gdn_value_head_dim   = 128;
+
+    static constexpr int query_heads = 16;
+    static constexpr int kv_heads    = 4;
+    static constexpr int head_dim    = 256;
+    static constexpr int rotary_dim  = 64;
+
+    static constexpr float rms_epsilon = 1.0e-6F;
+    static constexpr float rope_theta  = 1.0e7F;
+
+    static constexpr int key_dim               = gdn_key_heads * gdn_key_head_dim;
+    static constexpr int value_dim             = gdn_value_heads * gdn_value_head_dim;
+    static constexpr int convolution_dim       = 2 * key_dim + value_dim;
+    static constexpr int query_size            = query_heads * head_dim;
+    static constexpr int kv_size               = kv_heads * head_dim;
+    static constexpr int query_projection_rows = 2 * query_size;
+
+    static constexpr int mtp_layers               = 1;
+    static constexpr int mtp_input_rows           = 2 * hidden;
+    static constexpr int mtp_attention_input_rows = 2 * query_size + 2 * kv_size;
+    static constexpr int mtp_mlp_gate_up_rows     = 2 * intermediate;
+
+    // Physical layer 3,7,...,31 is full attention. The loop block [4,28) is visited twice; each
+    // visit owns an independent KV plane or recurrent-state slot.
+    using Plan = qwen3_6::ExecutionPlan<
+        physical_layers, 56, qwen3_6::full_attention_layers(physical_layers),
+        qwen3_6::gdn_layers(physical_layers),
+        qwen3_6::looped_slot_physical<physical_layers, 4, 28, 2>()>;
+
+    static constexpr int execution_slots      = Plan::slots;
+    static constexpr int full_attention_slots = Plan::full_slots;
+    static constexpr int gdn_slots            = Plan::gdn_slots;
+
+    [[nodiscard]] static constexpr bool is_full_attention(int physical) {
+        return qwen3_6::is_full_attention_layer(physical);
+    }
+    [[nodiscard]] static constexpr int full_attention_layers() {
+        return qwen3_6::full_attention_layers(physical_layers);
+    }
+    [[nodiscard]] static constexpr int gdn_layers() {
+        return qwen3_6::gdn_layers(physical_layers);
+    }
+    [[nodiscard]] static constexpr int full_attention_index(int physical) {
+        return qwen3_6::full_attention_index(physical);
+    }
+    [[nodiscard]] static constexpr int gdn_index(int physical) {
+        return qwen3_6::gdn_index(physical);
+    }
+    [[nodiscard]] static constexpr int slot_physical_layer(int slot) {
+        return Plan::slot_physical_layer(slot);
+    }
+    [[nodiscard]] static constexpr bool slot_is_full_attention(int slot) {
+        return Plan::slot_is_full(slot);
+    }
+    [[nodiscard]] static constexpr int slot_full_index(int slot) {
+        return Plan::slot_full_index(slot);
+    }
+    [[nodiscard]] static constexpr int slot_gdn_index(int slot) {
+        return Plan::slot_gdn_index(slot);
+    }
+    [[nodiscard]] static constexpr int physical_full_index(int physical) {
+        return Plan::physical_full_index(physical);
+    }
+    [[nodiscard]] static constexpr int physical_gdn_index(int physical) {
+        return Plan::physical_gdn_index(physical);
+    }
+};
+
+static_assert(TextConfig::execution_slots == 56);
+static_assert(TextConfig::full_attention_slots == 14);
+static_assert(TextConfig::gdn_slots == 42);
+static_assert(TextConfig::full_attention_layers() == 8);
+static_assert(TextConfig::gdn_layers() == 24);
+static_assert(TextConfig::query_projection_rows == 8192);
+
+struct VisionConfig : qwen3_6::VisionBackboneConfig {
+    static constexpr int output_hidden = TextConfig::hidden;
+};
+
+struct DFlashConfig {
+    static constexpr bool supported             = false;
+    static constexpr SpeculativeBackend backend = SpeculativeBackend::DFlash2;
+    static constexpr bool coherent_selector     = true;
+    static constexpr int layers                 = 5;
+    static constexpr int local_layers           = 5;
+    static constexpr int full_layers            = 0;
+    static constexpr int local_capacity         = 2048;
+    static constexpr int feature_layers         = 5;
+    static constexpr int feature_rows           = 25600;
+    static constexpr int hidden                 = TextConfig::hidden;
+    static constexpr int intermediate           = TextConfig::intermediate;
+    static constexpr int query_heads            = 32;
+    static constexpr int kv_heads               = 8;
+    static constexpr int head_dim               = 128;
+    static constexpr int query_size             = 4096;
+    static constexpr int kv_size                = 1024;
+    static constexpr int mask_token             = 248070;
+    static constexpr float rms_epsilon          = 1.0e-6F;
+    static constexpr float rope_theta           = 1.0e7F;
+    static constexpr float attention_scale      = 0.08838834764831845F;
+    static constexpr std::array<int, feature_layers> target_feature_layers{5, 19, 33, 47, 61};
+};
+
+inline constexpr float kAttentionScale                   = 0.0625F;
+inline constexpr float kGdnScale                         = 0.08838834764831845F;
+inline constexpr std::uint32_t kPrefillChunkAlignment    = 128;
+inline constexpr std::uint32_t kMaximumMtpDraftTokens    = 5;
+inline constexpr std::uint32_t kMaximumDFlashDraftTokens = 15;
+inline constexpr std::uint32_t kNativeContext            = 524288;
+
+} // namespace ninfer::targets::sensenova_loop_9b::detail

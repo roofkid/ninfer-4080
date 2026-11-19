@@ -37,9 +37,18 @@ constexpr bool catalog_is_closed() noexcept {
 
 static_assert(catalog_is_closed(), "GDN input routes must be exact and closed");
 
-bool supported_shape(const Q4Q5GdnInputProblem& problem) noexcept {
+bool is_27b(const Q4Q5GdnInputProblem& problem) noexcept {
     return problem.input_rows == 5120 && problem.qk_rows == 4096 && problem.value_z_rows == 12288 &&
            problem.qkv_rows == 10240 && problem.z_rows == 6144 && problem.padded_k == 5120;
+}
+
+bool is_loop_9b(const Q4Q5GdnInputProblem& problem) noexcept {
+    return problem.input_rows == 4096 && problem.qk_rows == 4096 && problem.value_z_rows == 8192 &&
+           problem.qkv_rows == 8192 && problem.z_rows == 4096 && problem.padded_k == 4096;
+}
+
+bool supported_shape(const Q4Q5GdnInputProblem& problem) noexcept {
+    return is_27b(problem) || is_loop_9b(problem);
 }
 
 } // namespace
@@ -74,6 +83,7 @@ Q4Q5GdnInputPlan q4_q5_gdn_input_resolve_plan(const Q4Q5GdnInputProblem& problem
             "Q4/Q5 GDN input: exact problem or column count is not admitted");
     }
 
+    if (is_loop_9b(problem)) { return {Q4Q5GdnInputScheduleId::GroupedMixedMmaR64C128}; }
     for (const RouteSpec& route : kRoutes) {
         if (!route.cols.contains(problem.cols)) { continue; }
         return {route.schedule};
@@ -87,7 +97,10 @@ Q4Q5GdnInputConvPlan q4_q5_gdn_input_conv_resolve_plan(const Q4Q5GdnInputProblem
         throw std::invalid_argument(
             "Q4/Q5 GDN input conv: exact problem or column count is not admitted");
     }
-    if (batch_size > 1) { return {Q4Q5GdnInputConvScheduleId::Materialized}; }
+    // The loop target's merged value/z parent has no matching fused epilogue profile.
+    if (is_loop_9b(problem) || batch_size > 1) {
+        return {Q4Q5GdnInputConvScheduleId::Materialized};
+    }
     switch (problem.cols) {
     case 1:
     case 2:

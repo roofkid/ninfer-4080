@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ninfer/targets/qwen3_6/execution_plan.h>
 #include <ninfer/targets/qwen3_6/frontend.h>
 #include <ninfer/targets/qwen3_6/hybrid_topology.h>
 #include <ninfer/targets/qwen3_6/vision.h>
@@ -11,9 +12,10 @@
 namespace ninfer::targets::qwen3_6_35b_a3b::detail {
 
 struct TextConfig {
-    static constexpr int hidden       = 2048;
-    static constexpr int layers       = 40;
-    static constexpr int intermediate = 512;
+    static constexpr int hidden          = 2048;
+    static constexpr int physical_layers = 40;
+    static constexpr int layers          = physical_layers;
+    static constexpr int intermediate    = 512;
 
     static constexpr int output_rows  = 248320;
     static constexpr int token_domain = static_cast<int>(qwen3_6::kTokenDomain);
@@ -60,10 +62,41 @@ struct TextConfig {
     }
 
     [[nodiscard]] static constexpr int gdn_index(int layer) { return qwen3_6::gdn_index(layer); }
+
+    using Plan = qwen3_6::ExecutionPlan<physical_layers, physical_layers,
+                                        qwen3_6::full_attention_layers(physical_layers),
+                                        qwen3_6::gdn_layers(physical_layers),
+                                        qwen3_6::identity_slot_physical<physical_layers>()>;
+
+    static constexpr int execution_slots      = Plan::slots;
+    static constexpr int full_attention_slots = Plan::full_slots;
+    static constexpr int gdn_slots            = Plan::gdn_slots;
+
+    [[nodiscard]] static constexpr int slot_physical_layer(int slot) {
+        return Plan::slot_physical_layer(slot);
+    }
+    [[nodiscard]] static constexpr bool slot_is_full_attention(int slot) {
+        return Plan::slot_is_full(slot);
+    }
+    [[nodiscard]] static constexpr int slot_full_index(int slot) {
+        return Plan::slot_full_index(slot);
+    }
+    [[nodiscard]] static constexpr int slot_gdn_index(int slot) {
+        return Plan::slot_gdn_index(slot);
+    }
+    [[nodiscard]] static constexpr int physical_full_index(int physical) {
+        return Plan::physical_full_index(physical);
+    }
+    [[nodiscard]] static constexpr int physical_gdn_index(int physical) {
+        return Plan::physical_gdn_index(physical);
+    }
 };
 
 static_assert(TextConfig::full_attention_layers() == 10);
 static_assert(TextConfig::gdn_layers() == 30);
+static_assert(TextConfig::execution_slots == TextConfig::physical_layers);
+static_assert(TextConfig::full_attention_slots == 10);
+static_assert(TextConfig::gdn_slots == 30);
 
 struct VisionConfig : qwen3_6::VisionBackboneConfig {
     static constexpr int output_hidden = TextConfig::hidden;

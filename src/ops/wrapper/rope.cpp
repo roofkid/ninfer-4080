@@ -140,4 +140,44 @@ void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& x, cudaS
     detail::rope_single_launch(positions, rotary_dim, theta, x, stream);
 }
 
+void rope(const Tensor& positions, int rotary_dim, float theta, const YarnRopeParameters& yarn,
+          Tensor& q, Tensor& k, cudaStream_t stream) {
+    require_common(positions, rotary_dim, theta);
+    if (q.dtype != DType::BF16 || k.dtype != DType::BF16) {
+        throw std::invalid_argument("rope: q/k must be BF16");
+    }
+    (void)numel_allow_zero(positions, "positions");
+    const std::int64_t q_numel = numel_allow_zero(q, "q");
+    (void)numel_allow_zero(k, "k");
+    const std::int32_t tokens   = q.ne[2];
+    const int axes              = position_axes(positions, tokens);
+    const std::int32_t head_dim = q.ne[0];
+    require_model_mode(axes, rotary_dim, head_dim);
+    require_tensor_layout(q, "q", head_dim, q.ne[1], tokens);
+    require_tensor_layout(k, "k", head_dim, k.ne[1], tokens);
+    if (q_numel == 0) { return; }
+    require_positions_storage(positions);
+    if (q.data == nullptr || k.data == nullptr) {
+        throw std::invalid_argument("rope: q/k data must be non-null");
+    }
+    detail::rope_yarn_launch(positions, rotary_dim, theta, yarn, q, k, stream);
+}
+
+void rope(const Tensor& positions, int rotary_dim, float theta, const YarnRopeParameters& yarn,
+          Tensor& x, cudaStream_t stream) {
+    require_common(positions, rotary_dim, theta);
+    if (x.dtype != DType::BF16) { throw std::invalid_argument("rope: tensor must be BF16"); }
+    (void)numel_allow_zero(positions, "positions");
+    const std::int64_t x_numel  = numel_allow_zero(x, "tensor");
+    const std::int32_t tokens   = x.ne[2];
+    const int axes              = position_axes(positions, tokens);
+    const std::int32_t head_dim = x.ne[0];
+    require_model_mode(axes, rotary_dim, head_dim);
+    require_tensor_layout(x, "tensor", head_dim, x.ne[1], tokens);
+    if (x_numel == 0) { return; }
+    require_positions_storage(positions);
+    if (x.data == nullptr) { throw std::invalid_argument("rope: tensor data must be non-null"); }
+    detail::rope_single_yarn_launch(positions, rotary_dim, theta, yarn, x, stream);
+}
+
 } // namespace ninfer::ops

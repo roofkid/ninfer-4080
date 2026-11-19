@@ -21,10 +21,11 @@ namespace ninfer::ops {
  *   z[:,t]   = value_z_weight[6144:12288,:] * x[:,t]
  *
  * Logical shapes:
- *   x [5120,T], qk weight/output rows 4096, value/z rows 6144 each, qkv [10240,T],
- *   z [6144,T]. T may be any positive value. x, qkv, and z are contiguous BF16.
- *   qk_weight is Q4G64_F16S RowSplit [4096,5120] and value_z_weight is one
- *   Q5G64_F16S RowSplit parent [12288,5120] in [value,z] row order, both with FP16 scales.
+ *   Qwen3.6-27B: x [5120,T], qk/output rows 4096, value/z rows 6144 each, qkv [10240,T],
+ *   z [6144,T]. SenseNova-Loop-9B: x [4096,T], qk/output rows 4096, value/z rows 4096 each,
+ *   qkv [8192,T], z [4096,T]. T may be any positive value. x, qkv, and z are contiguous BF16.
+ *   qk_weight is Q4G64_F16S RowSplit [4096,K] and value_z_weight is one Q5G64_F16S RowSplit
+ *   parent [2*value_rows,K] in [value,z] row order, both with FP16 scales.
  *
  * Numeric:
  *   The oracle exact-decodes both weight parents and evaluates all four logical projections
