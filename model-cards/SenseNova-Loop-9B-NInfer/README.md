@@ -37,28 +37,33 @@ qualified by CPU BF16 references, op oracles, and the AWQ cross-check.
 
 ## Run
 
-The repository launcher serves the validated 256K profile from a local `sm_89` build:
+Both launchers are Docker launchers, following `scripts/run-ninfer-4080.{sh,bat}`. They mount
+`sensenova_loop_9b.ninfer` from `out/` or `models/` read-only and serve the validated profile:
 
 ```bash
-./scripts/run-sensenova-loop-9b.sh out/sensenova_loop_9b.ninfer
+./scripts/run-sensenova-loop-9b.sh
 ```
 
-`.bat` is the Windows counterpart. The launcher finds `sensenova_loop_9b.ninfer` in `out/` and
-then `models/`; a first argument or `NINFER_MODEL_DIR` overrides that, and `NINFER_SERVER`
-selects another `ninfer-serve`. The profile is one lane, 262,144 tokens on int8 KV, vision
-enabled, 1,024-token prefill chunks, 4 GiB host KV, and MTP3 with the n-gram chain
-(`--lm-head-draft` is not passed because the release MTP has no optimized shortlist head).
+The image carries only the binaries. `NINFER_IMAGE` selects it (default
+`roofkid/ninfer-4080:sensenova`). A missing image is pulled; when the pull fails, the launcher
+builds it from the checkout's Dockerfile and labels it with the checkout revision, so source
+changes rebuild it. The published `roofkid/ninfer-4080:gsq3` image predates this target, so the
+first run is expected to build. `NINFER_BUILD=1` forces a rebuild. Overrides: `NINFER_ARTIFACT`,
+`NINFER_PORT` (8080), `NINFER_BIND` (0.0.0.0, set 127.0.0.1 to keep the port host-local),
+`NINFER_API_KEY`, and `NINFER_KV_DTYPE` (default int8; `rk4v4-e8` is the fallback/debug mode).
 
-The equivalent command is:
+The launcher runs this command inside the image with the artifact mounted at `/models`:
 
 ```bash
-./build/apps/ninfer-serve out/sensenova_loop_9b.ninfer \
-  --host 127.0.0.1 --port 8080 \
+ninfer-serve /models/sensenova_loop_9b.ninfer \
+  --host 0.0.0.0 --port 8080 \
   --max-context 262144 --kv-capacity 262144 --kv-dtype int8 \
   --max-concurrency 1 --max-pending-requests 16 \
   --prefill-chunk 1024 --host-kv-mib 4096 \
   --spec mtp --draft-tokens 3 --ngram chain \
-  --vision
+  --vision \
+  --temperature 1 --top-k 20 --top-p 0.95 --min-p 0 \
+  --presence-penalty 0 --frequency-penalty 0
 ```
 
 See [model semantics](../../docs/maintainer/sensenova-loop-9b-model.md) and

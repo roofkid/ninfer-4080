@@ -23,6 +23,15 @@ for windows_script in "$root"/*.bat "$root"/*.ps1; do
       grep -q 'NINFER_KV_DTYPE' "$counterpart"
       grep -q 'org.ninfer.revision' "$counterpart"
       ;;
+    */run-sensenova-loop-9b.bat)
+      # The pair is Docker-only and shares the KV selector and image contract.
+      grep -q 'NINFER_KV_DTYPE' "$windows_script"
+      grep -q 'NINFER_KV_DTYPE' "$counterpart"
+      grep -q 'NINFER_IMAGE' "$windows_script"
+      grep -q 'NINFER_IMAGE' "$counterpart"
+      grep -q 'org.ninfer.revision' "$windows_script"
+      grep -q 'org.ninfer.revision' "$counterpart"
+      ;;
   esac
 done
 
@@ -31,7 +40,7 @@ cat > "$tmp/ninfer-serve" <<'SERVER'
 printf '%s\n' "$@" > "$NINFER_TEST_ARGS"
 SERVER
 chmod +x "$tmp/ninfer-serve"
-touch "$tmp/qwen3_8_27b.ninfer" "$tmp/qwen3_6_35b_a3b.ninfer" "$tmp/sensenova_loop_9b.ninfer"
+touch "$tmp/qwen3_8_27b.ninfer" "$tmp/qwen3_6_35b_a3b.ninfer"
 
 launchers=(
   'run-qwen38-c1.sh:qwen3_8_27b.ninfer:--max-context:65536'
@@ -48,16 +57,9 @@ for entry in "${launchers[@]}"; do
   grep -Fx -- "$value" "$args" >/dev/null
 done
 
-# SenseNova's 256K launcher pins the full text+vision+MTP profile.
-NINFER_SERVER="$tmp/ninfer-serve" NINFER_TEST_ARGS="$tmp/sensenova.args" \
-  "$root/run-sensenova-loop-9b.sh" "$tmp/sensenova_loop_9b.ninfer" >/dev/null
-for expected in --max-context 262144 --kv-dtype int8 --max-concurrency 1 \
-  --spec mtp --draft-tokens 3 --ngram chain --vision; do
-  grep -Fx -- "$expected" "$tmp/sensenova.args" >/dev/null
-done
-
-# The 4080 launchers build the product image once per checkout revision. Stub
-# docker so the build decision and the served profile are checkable here.
+# The 4080 and SenseNova launchers build the product image once per checkout
+# revision. Stub docker so the build decision and the served profile are
+# checkable here.
 mkdir -p -- "$tmp/docker-bin" "$tmp/docker-state/images" "$tmp/4080"
 cat > "$tmp/docker-bin/docker" <<'DOCKER'
 #!/usr/bin/env bash
@@ -152,6 +154,29 @@ grep -Fx -- '--kv-dtype' "$tmp/docker-state/run-args" >/dev/null
 grep -Fx -- 'int8' "$tmp/docker-state/run-args" >/dev/null
 launch_4080 run-ninfer-4080.sh
 grep -Fx -- 'rk4v4-e8' "$tmp/docker-state/run-args" >/dev/null
+
+# The SenseNova launcher is Docker-only too. Its missing image is pulled (the
+# stub rejects the pull), then built from the checkout and reused by revision.
+mkdir -p -- "$tmp/sensenova" "$tmp/sensenova-docker/images"
+: > "$tmp/sensenova/artifact.ninfer"
+launch_sensenova() {
+  PATH="$tmp/docker-bin:$PATH" DOCKER_STUB_DIR="$tmp/sensenova-docker" \
+    NINFER_ARTIFACT="$tmp/sensenova/artifact.ninfer" "$root/run-sensenova-loop-9b.sh" >/dev/null 2>&1
+}
+launch_sensenova
+[[ "$(grep -c '^build ' "$tmp/sensenova-docker/log")" == 1 ]]
+launch_sensenova
+[[ "$(grep -c '^build ' "$tmp/sensenova-docker/log")" == 1 ]]
+grep -q 'ninfer-4080:sensenova' "$tmp/sensenova-docker/log"
+for expected in --max-context 262144 --kv-dtype int8 --max-concurrency 1 \
+  --spec mtp --draft-tokens 3 --ngram chain --vision; do
+  grep -Fx -- "$expected" "$tmp/sensenova-docker/run-args" >/dev/null
+done
+# NINFER_KV_DTYPE selects the served KV mode; the default stays int8.
+PATH="$tmp/docker-bin:$PATH" DOCKER_STUB_DIR="$tmp/sensenova-docker" \
+  NINFER_ARTIFACT="$tmp/sensenova/artifact.ninfer" NINFER_KV_DTYPE=rk4v4-e8 \
+  "$root/run-sensenova-loop-9b.sh" >/dev/null 2>&1
+grep -Fx -- 'rk4v4-e8' "$tmp/sensenova-docker/run-args" >/dev/null
 
 mkdir -- "$tmp/bin" "$tmp/models"
 cat > "$tmp/bin/curl" <<'CURL'
