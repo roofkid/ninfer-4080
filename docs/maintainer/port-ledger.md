@@ -121,8 +121,7 @@ deleted when the work finishes. Three items belong in this ledger:
   `roofkid/Qwen3.8-27B-GSQ3-NInfer` carries the 3-bit artifact
   (`qwen3_8_27b_gsq3.ninfer`, 13,330,776,576 bytes, sha256
   `c6f27073393e5bcc629489420470d71f52a27553bfc5c360fef07a25b3b550d7`), the model card, the
-  manifest, and the hash list; `roofkid/ninfer-4080:gsq3` (Docker Hub, tags `gsq3` and
-  `0.6.2-rtx4080`, digest
+  manifest, and the hash list; `roofkid/ninfer-4080:0.6.2-rtx4080` (Docker Hub, digest
   `sha256:bfbf286f429651295ed73feb8ef4f52a7bac30237d995c7e8dfeb37bb79867f9`) is the
   binaries-only image. The image was republished 2026-10-09 with the session-28/29 decode work
   (native 16-column small-T tile, MTP n-gram chain default) while the artifact stayed unchanged.
@@ -133,6 +132,20 @@ deleted when the work finishes. Three items belong in this ledger:
   sources are Apache-2.0 (GSQ checkpoint, base model, DFlash2), and the card states that
   the verbatim claim covers the 323 packed objects from the GSQ checkpoint while the MTP,
   Vision, and DFlash2 components are converter-quantized.
+
+- **SenseNova-Loop-9B publication (2026-11-20, 0.6.3).** The fork registers
+  `sensenova-loop-9b/groupwise-int` and publishes the artifact at
+  `roofkid/SenseNova-Loop-9B-NInfer` revision
+  `edc22fec8e5f742a9442f4997b266e99dc70d0f8`: `sensenova_loop_9b.ninfer`,
+  6,248,091,904 bytes, sha256
+  `e793869f6b4edb98ae1a8f08899a28f938ed77652796f5eaf572785cc48267e0`, with the model card,
+  manifest, and hash list. `roofkid/ninfer-4080:0.6.3-rtx4080` (digest
+  `sha256:004fb429f264ee40c12d13e7bbad48c34ba3d1f511ca6bec7d69db71c488073c`) is the
+  binaries-only image; the `sensenova` and `gsq3` aliases point at the same digest, while
+  `0.6.2-rtx4080` stays unchanged. `scripts/download-sensenova-loop-9b.{sh,bat}` pin the
+  Hugging Face revision and verify the hash; `scripts/run-sensenova-loop-9b.{sh,bat}` serve the
+  256K + vision + MTP3 + n-gram profile. The Qwen3.8 `gsq3` path was smoke-tested on the same
+  image.
 
 ## Feature rows
 

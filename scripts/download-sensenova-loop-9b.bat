@@ -2,7 +2,7 @@
 setlocal
 for %%I in ("%~dp0..") do set "ROOT=%%~fI"
 if not defined NINFER_MODEL_DIR set "NINFER_MODEL_DIR=%ROOT%\models"
-if not defined NINFER_REVISION set "NINFER_REVISION=main"
+if not defined NINFER_REVISION set "NINFER_REVISION=edc22fec8e5f742a9442f4997b266e99dc70d0f8"
 set "MODEL=%NINFER_MODEL_DIR%\sensenova_loop_9b.ninfer"
 set "EXPECTED_SHA256=e793869f6b4edb98ae1a8f08899a28f938ed77652796f5eaf572785cc48267e0"
 

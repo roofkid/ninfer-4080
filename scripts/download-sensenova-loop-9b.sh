@@ -8,7 +8,7 @@ model="$model_dir/sensenova_loop_9b.ninfer"
 mkdir -p -- "$model_dir"
 # Pinned to the published revision; override with NINFER_REVISION. The SHA-256 below is the
 # content pin, so a moved tag or branch fails the check instead of silently changing the artifact.
-revision="${NINFER_REVISION:-main}"
+revision="${NINFER_REVISION:-edc22fec8e5f742a9442f4997b266e99dc70d0f8}"
 expected_sha256='e793869f6b4edb98ae1a8f08899a28f938ed77652796f5eaf572785cc48267e0'
 
 printf '%s\n' "Downloading SenseNova-Loop-9B NInfer model (revision $revision)..."
