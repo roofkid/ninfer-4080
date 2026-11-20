@@ -25,7 +25,7 @@ The executable `--help` output is the exact source for command-line option spell
 | Qwen3.8-27B | `groupwise-int` | [Hugging Face](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) | [model card](../model-cards/Qwen3.8-27B-NInfer/README.md) |
 | Qwen3.8-27B | `nvfp4` | [Hugging Face](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) | [model card](../model-cards/Qwen3.8-27B-nvfp4-NInfer/README.md) |
 | Qwen3.6-35B-A3B | `groupwise-int` | [Hugging Face](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer) | [model card](../model-cards/Qwen3.6-35B-A3B-NInfer/README.md) |
-| SenseNova-Loop-9B | `groupwise-int` | Local conversion | [model card](../model-cards/SenseNova-Loop-9B-NInfer/README.md) |
+| SenseNova-Loop-9B | `groupwise-int` | [Hugging Face](https://huggingface.co/roofkid/SenseNova-Loop-9B-NInfer) | [model card](../model-cards/SenseNova-Loop-9B-NInfer/README.md) |
 
 ## Repository-local guides
 
@@ -55,7 +55,7 @@ Runtime and Op references:
 - [Op admission, contracts, ownership, qualification, and performance rules](maintainer/op-development.md)
 - [ReplaySSM GDN technical reference](maintainer/replayssm-gdn.md)
 - [Linear benchmark contract and registered suites](maintainer/linear-benchmark.md)
-- [SenseNova-Loop-9B RTX 4080 target plan](maintainer/sensenova-loop-9b-plan.md) (active implementation record)
+- [SenseNova-Loop-9B RTX 4080 target plan](maintainer/sensenova-loop-9b-plan.md) (completed implementation record)
 
 `engine-architecture.md` is the sole top-level Engine architecture reference.
 `resource-scheduling-and-context-cache.md` is its narrower authority for resource selection,

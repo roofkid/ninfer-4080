@@ -1,4 +1,26 @@
+---
+library_name: ninfer
+pipeline_tag: image-text-to-text
+inference: false
+license: apache-2.0
+base_model:
+  - sensenova/SenseNova-Loop-9B
+  - sensenova/SenseNova-Loop-9B-AWQ
+base_model_relation: quantized
+tags:
+  - ninfer
+  - sensenova
+  - multimodal
+  - cuda
+  - rtx-4080
+  - 4-bit
+  - awq
+---
+
 # SenseNova-Loop-9B NInfer
+
+This model card is the version-controlled source for
+[roofkid/SenseNova-Loop-9B-NInfer](https://huggingface.co/roofkid/SenseNova-Loop-9B-NInfer).
 
 NInfer target for `sensenova/SenseNova-Loop-9B` on a single RTX 4080 (`sm_89`, 16 GiB).
 
@@ -6,6 +28,9 @@ NInfer target for `sensenova/SenseNova-Loop-9B` on a single RTX 4080 (`sm_89`, 1
 |---|---|
 | NInfer identity | `sensenova-loop-9b` / `groupwise-int` / `sensenova_loop_9b` |
 | Source revision | `8327226ffd2e33e34cb5466a0e6cccd4419bde40` (official AWQ) |
+| Base revision | `3e1ba6e8ac98090f9f7c03a55f26269eb3850fb6` (BF16 release, gated) |
+| Image | `roofkid/ninfer-4080:sensenova` (alias of `0.6.3-rtx4080`) |
+| License | Apache-2.0 |
 | Artifact | `sensenova_loop_9b.ninfer` |
 | Artifact bytes | 6,248,091,904 |
 | Artifact SHA-256 | `e793869f6b4edb98ae1a8f08899a28f938ed77652796f5eaf572785cc48267e0` |
@@ -13,6 +38,14 @@ NInfer target for `sensenova/SenseNova-Loop-9B` on a single RTX 4080 (`sm_89`, 1
 | Context | 262144 validated with int8 KV (524288 native limit) |
 | Modalities | Text and image; video not supported |
 | Speculation | MTP3 + n-gram chain; no optimized proposal head, no DFlash2 |
+
+The repository also carries `SHA256SUMS` and `artifact-manifest.json`. Verify a download with:
+
+```bash
+printf '%s  %s\n' \
+  'e793869f6b4edb98ae1a8f08899a28f938ed77652796f5eaf572785cc48267e0' \
+  'sensenova_loop_9b.ninfer' | sha256sum --check
+```
 
 This is a 4-bit groupwise-int artifact converted from the official AWQ 4-bit release. The AWQ
 GEMM matrices and row-major quantized embedding are dequantized, the AWQ-adjusted RMSNorm weights
@@ -38,22 +71,23 @@ not met by this artifact; it is published as a functional target with measured r
 performance claim. BF16 end-to-end inference is not possible on the 16 GiB card; correctness is
 qualified by CPU BF16 references, op oracles, and the AWQ checkpoint comparison.
 
-## Run
-
-Both launchers are Docker launchers, following `scripts/run-ninfer-4080.{sh,bat}`. They mount
-`sensenova_loop_9b.ninfer` from `out/` or `models/` read-only and serve the validated profile:
+## Download and run
 
 ```bash
+./scripts/download-sensenova-loop-9b.sh       # .bat on Windows
 ./scripts/run-sensenova-loop-9b.sh
 ```
 
+Both launchers are Docker launchers, following `scripts/run-ninfer-4080.{sh,bat}`. They mount
+`sensenova_loop_9b.ninfer` from `out/` or `models/` read-only and serve the validated profile.
+
 The image carries only the binaries. `NINFER_IMAGE` selects it (default
-`roofkid/ninfer-4080:sensenova`). A missing image is pulled; when the pull fails, the launcher
-builds it from the checkout's Dockerfile and labels it with the checkout revision, so source
-changes rebuild it. The published `roofkid/ninfer-4080:gsq3` image predates this target, so the
-first run is expected to build. `NINFER_BUILD=1` forces a rebuild. Overrides: `NINFER_ARTIFACT`,
-`NINFER_PORT` (8080), `NINFER_BIND` (0.0.0.0, set 127.0.0.1 to keep the port host-local),
-`NINFER_API_KEY`, and `NINFER_KV_DTYPE` (default int8; `rk4v4-e8` is the fallback/debug mode).
+`roofkid/ninfer-4080:sensenova`, the model alias of `0.6.3-rtx4080`). A missing image is pulled
+from Docker Hub; when the pull fails, the launcher builds it from the checkout's Dockerfile and
+labels it with the checkout revision, so source changes rebuild it. `NINFER_BUILD=1` forces a
+rebuild. Overrides: `NINFER_ARTIFACT`, `NINFER_PORT` (8080), `NINFER_BIND` (0.0.0.0, set
+127.0.0.1 to keep the port host-local), `NINFER_API_KEY`, and `NINFER_KV_DTYPE` (default int8;
+`rk4v4-e8` is the fallback/debug mode).
 
 The launcher runs this command inside the image with the artifact mounted at `/models`:
 
@@ -69,5 +103,12 @@ ninfer-serve /models/sensenova_loop_9b.ninfer \
   --presence-penalty 0 --frequency-penalty 0
 ```
 
-See [model semantics](../../docs/maintainer/sensenova-loop-9b-model.md) and
-[artifact contracts](../../docs/maintainer/sensenova-loop-9b-artifact.md).
+See
+[model semantics](https://github.com/roofkid/ninfer-4080/blob/rtx4080-port/docs/maintainer/sensenova-loop-9b-model.md)
+and
+[artifact contracts](https://github.com/roofkid/ninfer-4080/blob/rtx4080-port/docs/maintainer/sensenova-loop-9b-artifact.md).
+
+## License
+
+Apache-2.0. The release checkpoint is gated on Hugging Face; the published artifact and this card
+are Apache-2.0.

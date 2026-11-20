@@ -14,17 +14,18 @@
 #     presence/frequency penalties 0
 #
 # The image carries only the binaries; the artifact is bind-mounted read-only, so the container
-# stays small and never contains model weights. The artifact is produced locally by the converter
-# (docs/maintainer/sensenova-loop-9b-artifact.md); the launcher looks for it in <repo>/out and then
-# <repo>/models.
+# stays small and never contains model weights. The artifact is published at
+# roofkid/SenseNova-Loop-9B-NInfer; download it with scripts/download-sensenova-loop-9b.sh (or
+# .bat), or convert it with the converter (docs/maintainer/sensenova-loop-9b-artifact.md). The
+# launcher looks for it in <repo>/out and then <repo>/models.
 #
 # Image resolution: an existing local image is used as-is. A missing image is pulled from the
 # registry; if the pull fails and this checkout has a Dockerfile, the image is built from source.
 # NINFER_BUILD=1 always builds from source. A locally built image carries the checkout revision
 # (label org.ninfer.revision), so pulling source changes and re-running this launcher rebuilds
 # that image instead of serving the previous build; published images have no label and are
-# served as pulled. The published roofkid/ninfer-4080:gsq3 image predates this target, so the
-# SenseNova tag is expected to build on first use until a SenseNova image is published.
+# served as pulled. The published roofkid/ninfer-4080:sensenova tag (0.6.3-rtx4080) includes this
+# target, so a pull normally serves the published binaries.
 #
 # Measured on this card (docs/maintainer/sensenova-loop-9b-model.md section 6): this 256K + Vision
 # + MTP3 profile starts with about 0.35 GiB available after startup, so it stays one lane.
@@ -64,7 +65,7 @@ command -v docker >/dev/null 2>&1 || {
 }
 if [[ ! -f "$artifact" ]]; then
     echo "Missing $artifact" >&2
-    echo "Convert it with tools/convert/sensenova_loop_9b, or point NINFER_ARTIFACT" >&2
+    echo "Download it with scripts/download-sensenova-loop-9b.sh, or point NINFER_ARTIFACT" >&2
     echo "at an existing sensenova_loop_9b.ninfer copy." >&2
     exit 1
 fi

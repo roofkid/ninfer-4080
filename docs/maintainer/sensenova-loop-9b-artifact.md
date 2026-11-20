@@ -56,6 +56,14 @@ The current artifact is 6,248,091,904 bytes with SHA-256
 `e793869f6b4edb98ae1a8f08899a28f938ed77652796f5eaf572785cc48267e0`. The size and hash describe the
 generated file; identity is serialized and never inferred from filename, hash, or object count.
 
+The artifact is published at
+[roofkid/SenseNova-Loop-9B-NInfer](https://huggingface.co/roofkid/SenseNova-Loop-9B-NInfer) in
+NInfer-4080 0.6.3. Download it with `scripts/download-sensenova-loop-9b.sh` or:
+
+```bash
+hf download roofkid/SenseNova-Loop-9B-NInfer sensenova_loop_9b.ninfer --local-dir models
+```
+
 ## 3. Text objects
 
 All matrix shapes are logical `[N,K] = [output rows,input columns]`; quantization groups along K.

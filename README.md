@@ -1,14 +1,23 @@
 # NInfer-4080
 
-**Qwen3.8-27B on a single 16 GB RTX 4080, at 100K context, with vision and speculative decoding.**
+**Qwen3.8-27B and SenseNova-Loop-9B on a single 16 GB RTX 4080, with long context, vision, and
+speculative decoding.**
+
+Release notes: [0.6.3](RELEASE_NOTES_0.6.3.md).
 
 NInfer-4080 runs the
 [ISTA-DASLab Qwen3.8-27B 3-bit GSQ](https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-3Bit-GSQ)
 checkpoint on one NVIDIA GeForce RTX 4080 using more of the hardware than the general-purpose
 engines do: up to **2,754 tok/s prefill** and **385 tok/s generation** are measured on this card
 (sweep below), with the full **100,000-token context, vision, and MTP3/DFlash2 speculative
-decoding** profiles resident at once. The artifact and a binaries-only container image are
+decoding** profiles resident at once. The artifacts and a binaries-only container image are
 published, so there is nothing to convert before you run it.
+
+Version 0.6.3 adds the registered `sensenova-loop-9b/groupwise-int` target: the official AWQ
+checkpoint converted to a 6.25 GB NInfer artifact, serving 262,144 tokens with int8 KV, vision,
+and MTP3 + n-gram on the same card. See
+[SenseNova-Loop-9B](#sensenova-loop-9b-new-in-063) below and the
+[model card](model-cards/SenseNova-Loop-9B-NInfer/README.md).
 
 It is an `sm_89` port of [NInfer-4090](https://github.com/sergiuszm/ninfer-4090), which derives
 from [NInfer-3090](https://github.com/Don-Chad/ninfer-3090) and
@@ -23,10 +32,14 @@ documented in [docs/](docs/).
 
 - Runs ISTA-DASLab's 3-bit GSQ Qwen3.8-27B at 100K context on one RTX 4080 16 GB.
 - Up to 2,754 tok/s prefill and 385 tok/s generation, measured on the card.
+- Adds the registered SenseNova-Loop-9B target: official AWQ source, 256K text + vision, mHC/YaRN,
+  and MTP3 + n-gram.
 - 3.125 bpw Text body repacked verbatim from the publisher; Q4 vocabulary endpoints; DFlash2
   companion requantized to Q4 and enabled.
-- Artifact: [roofkid/Qwen3.8-27B-GSQ3-NInfer](https://huggingface.co/roofkid/Qwen3.8-27B-GSQ3-NInfer)
-  (12.4 GiB). Image: `roofkid/ninfer-4080:gsq3` (Docker Hub, tags `gsq3` and `0.6.2-rtx4080`).
+- Artifacts: [roofkid/Qwen3.8-27B-GSQ3-NInfer](https://huggingface.co/roofkid/Qwen3.8-27B-GSQ3-NInfer)
+  (12.4 GiB) and [roofkid/SenseNova-Loop-9B-NInfer](https://huggingface.co/roofkid/SenseNova-Loop-9B-NInfer)
+  (6.25 GiB). Image: `roofkid/ninfer-4080:0.6.3-rtx4080` (Docker Hub, aliases `gsq3` and
+  `sensenova`).
 - Three commands: download, `docker run`, serve.
 
 ## How to use it
@@ -78,6 +91,23 @@ The server speaks OpenAI Chat Completions, OpenAI Responses, and Anthropic Messa
 from source (`cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DNINFER_BUILD_APPS=ON`,
 then `cmake --build build --parallel`) and run `./build/apps/ninfer models/qwen3_8_27b_gsq3.ninfer
 --prompt "..." --kv-dtype rk4v4-e8 --spec mtp --draft-tokens 3 --lm-head-draft`.
+
+## SenseNova-Loop-9B (new in 0.6.3)
+
+The same 0.6.3 image also serves the registered `sensenova-loop-9b/groupwise-int` target:
+
+```bash
+./scripts/download-sensenova-loop-9b.sh       # .bat on Windows
+./scripts/run-sensenova-loop-9b.sh
+```
+
+The launcher serves 262,144 tokens with int8 KV, vision, MTP3, and the n-gram chain, one lane.
+The artifact is converted from the official AWQ checkpoint and measures 8.55 quick perplexity
+versus 9.15 for the prior BF16-sourced artifact. The 256K + vision + MTP3 profile leaves about
+0.35 GiB free after startup; the plan's speed bars and the end-to-end 256K decode depth remain
+open. Video is not supported. See the
+[model card](model-cards/SenseNova-Loop-9B-NInfer/README.md) for the measured limits and
+provenance.
 
 ## Measured results on the RTX 4080
 
@@ -201,6 +231,9 @@ printf '%s  %s\n' \
   shared with the launcher instead of duplicated.
 - **DFlash2 companion** requantized to `Q4G64_F16S` and bound in the `gsq3` identity, which
   raised the K=7 caps from 57K to 100,000 tokens text-only.
+- **SenseNova-Loop-9B target (0.6.3)**: the compile-time 56-slot loop plan, mHC Ops, YaRN RoPE,
+  16/4 attention, 42-slot GDN state, 256K text + vision, MTP3 + n-gram, the AWQ converter and
+  verifier, the model card, and the Docker launcher.
 - **Launchers and this publication**: `scripts/run-ninfer-4080.sh`, `.bat`, the artifact download
   scripts, and the published image.
 
@@ -209,6 +242,8 @@ printf '%s  %s\n' \
 - One process, one GPU, one resident model, bounded FIFO admission, no preemption, and no
   multi-GPU execution. The 100K profile runs one lane.
 - The artifact is accepted only by this fork (`weights_id = gsq3` is not registered upstream).
+- SenseNova-Loop-9B runs one lane at 256K; the 256K + vision + MTP3 profile leaves about 0.35 GiB
+  after startup. Video is not supported, and the plan's speed bars are not met.
 - CUDA 13.1-or-newer userspace; the image is built for `sm_89` only.
 - Context allocation is subject to GPU memory and the selected KV-cache type.
 - NInfer does not execute generated tool calls.
@@ -265,6 +300,9 @@ heavy lifting, and to ISTA-DASLab for GSQ - cheers to Austria from Germany.
   calibration, tokenizer), Apache-2.0.
 - [z-lab/Qwen3.8-27B-DFlash2](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2) - the DFlash2
   draft companion, Apache-2.0.
+- [sensenova/SenseNova-Loop-9B](https://huggingface.co/sensenova/SenseNova-Loop-9B) and
+  [sensenova/SenseNova-Loop-9B-AWQ](https://huggingface.co/sensenova/SenseNova-Loop-9B-AWQ) - the
+  base and AWQ checkpoints the SenseNova artifact is converted from, Apache-2.0.
 
 ## Support
 

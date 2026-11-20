@@ -16,9 +16,10 @@ rem      presence/frequency penalties 0
 rem
 rem  The image carries only the binaries; the artifact is bind-mounted
 rem  read-only, so the container stays small and never contains model weights.
-rem  The artifact is produced locally by the converter
-rem  (docs\maintainer\sensenova-loop-9b-artifact.md); the launcher looks for it
-rem  in <repo>\out and then <repo>\models.
+rem  The artifact is published at roofkid/SenseNova-Loop-9B-NInfer; download it
+rem  with scripts\download-sensenova-loop-9b.bat (or .sh), or convert it with the
+rem  converter (docs\maintainer\sensenova-loop-9b-artifact.md). The launcher
+rem  looks for it in <repo>\out and then <repo>\models.
 rem
 rem  Image resolution: an existing local image is used as-is. A missing image is
 rem  pulled from the registry; if the pull fails and this checkout has a
@@ -27,8 +28,8 @@ rem  from source. A locally built image carries the checkout revision (label
 rem  org.ninfer.revision), so pulling source changes and re-running this launcher
 rem  rebuilds that image instead of serving the previous build; published images
 rem  have no label and are served as pulled. The published
-rem  roofkid/ninfer-4080:gsq3 image predates this target, so the SenseNova tag is
-rem  expected to build on first use until a SenseNova image is published.
+rem  roofkid/ninfer-4080:sensenova tag (0.6.3-rtx4080) includes this target, so a
+rem  pull normally serves the published binaries.
 rem
 rem  Measured on this card
 rem  (docs\maintainer\sensenova-loop-9b-model.md section 6): this 256K + Vision +
@@ -73,7 +74,7 @@ if errorlevel 1 (
 )
 if not exist "%NINFER_ARTIFACT%" (
   echo Missing %NINFER_ARTIFACT%
-  echo Convert it with tools\convert\sensenova_loop_9b, or set NINFER_ARTIFACT
+  echo Download it with scripts\download-sensenova-loop-9b.bat, or set NINFER_ARTIFACT
   echo to an existing sensenova_loop_9b.ninfer copy.
   exit /b 1
 )

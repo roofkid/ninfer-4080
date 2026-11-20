@@ -140,6 +140,9 @@ containers remain JSON. The tokenizer adds no BOS token and uses `<|endoftext|>`
 
 ## 6. Measured evidence and limits
 
+The artifact, model card, and `sensenova` Docker tag are published in NInfer-4080 0.6.3 at
+`roofkid/SenseNova-Loop-9B-NInfer` and `roofkid/ninfer-4080:0.6.3-rtx4080`.
+
 Measured on the RTX 4080 (16 GiB, 76 SMs, compute 8.9, driver 621.24) with artifact
 `sensenova_loop_9b.ninfer`:
 

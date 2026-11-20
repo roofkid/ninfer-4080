@@ -1,13 +1,16 @@
 # SenseNova-Loop-9B RTX 4080 Target Plan
 
-Status: active implementation plan. This is a working record, not a delivered contract.
-Replace it with model/artifact references and remove it when the target is complete or abandoned.
+Status: completed implementation record. The delivered contracts are in
+[`sensenova-loop-9b-model.md`](sensenova-loop-9b-model.md) and
+[`sensenova-loop-9b-artifact.md`](sensenova-loop-9b-artifact.md); this file preserves the staged
+design and measurement history.
 
 Plan date: 2026-11-18
 
 ## Implementation status (2026-11-20)
 
-The target is implemented and runs on the RTX 4080. Delivered:
+The target is implemented, runs on the RTX 4080, and is published in NInfer-4080 0.6.3 as
+`roofkid/SenseNova-Loop-9B-NInfer` and the `sensenova`/`0.6.3-rtx4080` image. Delivered:
 
 - compile-time 56-slot execution plan with physical-weight/shared-slot state separation;
 - mHC router/merge/enter/leave Ops and FP64 oracle tests;

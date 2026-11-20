@@ -1,0 +1,69 @@
+{
+  "schema": "ninfer.artifact-manifest",
+  "schema_version": 1,
+  "artifact": {
+    "filename": "sensenova_loop_9b.ninfer",
+    "bytes": 6248091904,
+    "sha256": "e793869f6b4edb98ae1a8f08899a28f938ed77652796f5eaf572785cc48267e0",
+    "container_version": 2,
+    "model_id": "sensenova-loop-9b",
+    "weights_id": "groupwise-int",
+    "target_key": "sensenova_loop_9b"
+  },
+  "source": {
+    "base": {
+      "repo_id": "sensenova/SenseNova-Loop-9B",
+      "revision": "3e1ba6e8ac98090f9f7c03a55f26269eb3850fb6",
+      "license": "Apache-2.0"
+    },
+    "quantized": {
+      "repo_id": "sensenova/SenseNova-Loop-9B-AWQ",
+      "revision": "8327226ffd2e33e34cb5466a0e6cccd4419bde40",
+      "license": "Apache-2.0"
+    },
+    "resource_fallback": {
+      "repo_id": "sensenova/SenseNova-Loop-9B",
+      "revision": "3e1ba6e8ac98090f9f7c03a55f26269eb3850fb6",
+      "file": "video_preprocessor_config.json",
+      "license": "Apache-2.0"
+    }
+  },
+  "conversion": {
+    "recipe_id": "sensenova_loop_9b-awq-groupwise-int-v1",
+    "converter_repository": "https://github.com/roofkid/ninfer-4080",
+    "converter_revision": "e21d793eebae4bbfabd4fcdf4cbbed2530eba090",
+    "source_format": "awq-gemm"
+  },
+  "runtime": {
+    "repository": "https://github.com/roofkid/ninfer-4080",
+    "minimum_revision": "e21d793eebae4bbfabd4fcdf4cbbed2530eba090",
+    "cuda_architecture": "sm_89"
+  },
+  "inventory": {
+    "objects": 834,
+    "tensors": 828,
+    "resources": 6,
+    "formats": {
+      "BF16": 406,
+      "FP32": 144,
+      "Q4G64_F16S": 118,
+      "Q5G64_F16S": 150,
+      "Q6G64_F16S": 3,
+      "W8G32_F16S": 7
+    },
+    "layouts": {
+      "contiguous-le-v1": 550,
+      "row-split-k128-v1": 278
+    },
+    "encodings": {
+      "raw-bytes-v1": 6
+    },
+    "bytes": {
+      "tensor": 6227936672,
+      "resource": 19999384,
+      "object": 6247936056,
+      "payload_span": 6247960832,
+      "alignment": 24776
+    }
+  }
+}

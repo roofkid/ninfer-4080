@@ -195,7 +195,9 @@ chmod +x "$tmp/bin/curl"
 # The stub curl writes an empty file, so the pinned SHA-256 check is skipped here.
 PATH="$tmp/bin:$PATH" NINFER_MODEL_DIR="$tmp/models" NINFER_SKIP_SHA256=1 "$root/download-qwen38.sh" >/dev/null
 PATH="$tmp/bin:$PATH" NINFER_MODEL_DIR="$tmp/models" "$root/download-qwen36-35b-vision.sh" >/dev/null
+PATH="$tmp/bin:$PATH" NINFER_MODEL_DIR="$tmp/models" NINFER_SKIP_SHA256=1 "$root/download-sensenova-loop-9b.sh" >/dev/null
 [[ -f "$tmp/models/qwen3_8_27b.ninfer" ]]
 [[ -f "$tmp/models/qwen3_6_35b_a3b.ninfer" ]]
+[[ -f "$tmp/models/sensenova_loop_9b.ninfer" ]]
 
 printf '%s\n' 'Linux script checks passed.'
