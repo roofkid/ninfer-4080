@@ -112,11 +112,12 @@ multiplied by the attention factor. Unscaled Qwen variants keep the existing RoP
 
 ## 3. MTP
 
-The release MTP is a separate `mtp.safetensors` with one full-attention dense layer, hidden 4096,
+The MTP is a separate checkpoint (`mtp/` in the AWQ release) with one full-attention dense layer, hidden 4096,
 FFN 12288, 16 Q / 4 KV, head width 256, partial MRoPE, and `mtp_use_dedicated_embeddings=false`.
 The stem is `x = fc([RMSNorm(embedding), RMSNorm(target_hidden)])`. The release MTP has no
 optimized shortlist head; target verification uses the full text `lm_head`. The separate
-`mtp.norm.weight` is the draft final norm; the release does not contain AWQ's `main_norm`.
+`mtp.norm.weight` is the draft final norm. The AWQ MTP carries an extra `main_norm` tensor; it is
+not consumed.
 
 The Engine path is MTP3 plus the model-agnostic n-gram chain. DFlash2 is not registered because no
 official SenseNova draft exists.
@@ -151,7 +152,7 @@ Measured on the RTX 4080 (16 GiB, 76 SMs, compute 8.9, driver 621.24) with artif
 | 3.5K-token prefill | 2.62k–2.65k tok/s |
 | 3.5K decode, MTP0 | ~36 tok/s |
 | 3.5K decode, MTP3 + n-gram | ~58 tok/s |
-| 49-token perplexity | 5.32 vs BF16 CPU 5.09 |
+| Quick corpus PPL, int8 KV | 8.55, versus 9.15 for the prior BF16-sourced artifact |
 
 The first two capacity checks use the non-speculative profile; adding MTP3 with the n-gram chain
 lowers the 256K + Vision startup headroom to about 0.35 GiB. That is the profile the repository
@@ -164,5 +165,5 @@ proven Qwen Q4/Q5/Q6/W8 vision roles rather than BF16 vision weights; this was r
 vision route on qualified kernels and leaves more headroom for the 256K profile.
 
 The 2+2 prompt is sensitive to Q4/Q5 quantization and can echo the prompt where BF16 continues with
-`4`; short-prompt token equality is not a quality criterion. The documented quality check is the
-perplexity/AWQ comparison, not exact greedy text.
+`4`; short-prompt token equality is not a quality criterion. The documented quality checks are the
+quick-corpus perplexity comparison and the external MBPP run, not exact greedy text.

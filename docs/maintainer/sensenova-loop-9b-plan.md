@@ -5,7 +5,7 @@ Replace it with model/artifact references and remove it when the target is compl
 
 Plan date: 2026-11-18
 
-## Implementation status (2026-11-19)
+## Implementation status (2026-11-20)
 
 The target is implemented and runs on the RTX 4080. Delivered:
 
@@ -19,8 +19,9 @@ The target is implemented and runs on the RTX 4080. Delivered:
 - Vision path with the 4096-wide merger.
 
 Measured: 256K Text+int8 KV starts with 1.68 GiB free; 256K+Vision starts with 1.27 GiB free;
-253K-token prefill 1.72k tok/s; 3.5K decode ~36 tok/s MTP0 and ~58 tok/s MTP3+n-gram;
-49-token perplexity 5.32 vs 5.09 BF16 CPU.
+253K-token prefill 1.72k tok/s; 3.5K decode ~36 tok/s MTP0 and ~58 tok/s MTP3+n-gram; quick
+corpus PPL 8.55 for the canonical AWQ source versus 9.15 for the prior BF16-sourced artifact. The
+maintainer MBPP comparison found no regression, so the AWQ source is now the default artifact.
 
 Remaining gaps: the plan's aspirational decode/prefill bars are not met; 256K-depth decode was not
 benchmarked (253K prefill was); Vision uses the proven quantized Qwen roles instead of BF16 tower
@@ -68,7 +69,7 @@ Useful project rules:
 
 Add a registered NInfer target for `sensenova/SenseNova-Loop-9B` to the RTX 4080 fork:
 
-- 4-bit groupwise-int weights converted from the official release BF16 checkpoint
+- 4-bit groupwise-int weights converted from the official AWQ checkpoint and re-encoded
 - 256K context with q8/int8 KV as the hard text baseline
 - 256K with vision and int8 KV as the stretch target
 - If 256K + vision + int8 does not fit, reduce vision context to about 200K
@@ -87,9 +88,9 @@ stop and report the measured gap; do not silently switch to uniform Q4 or `rk4v4
 |---|---|
 | Deliverable | Production target with tests, benchmarks, docs; not a design-only study |
 | Hardware | RTX 4080 16 GB, `sm_89`; no 5090/NVFP4 work |
-| Weight source | Official release BF16 checkpoint, pinned revision |
+| Weight source | Official AWQ 4-bit checkpoint, pinned revision |
 | Weight format | NInfer groupwise-int Q4/Q5/Q6 mixed artifact; mHC and GDN control scalars in FP32 |
-| AWQ | Quality/reference model only; not the artifact source and not a new runtime format |
+| AWQ | Artifact source; the BF16 release remains the numerical comparison reference; no AWQ runtime format |
 | Context | 256K q8 text is the hard baseline; 256K + vision + q8 is best-effort |
 | Vision fallback | Reduce vision context to ~200K, keeping q8 and Q4/Q5 weights |
 | Modalities | Text + image; video out of scope |
@@ -97,7 +98,7 @@ stop and report the measured gap; do not silently switch to uniform Q4 or `rk4v4
 | Family | Extend the existing Qwen3.6/Qwen3.5 hybrid family with a compile-time execution plan |
 | Parity | Full Engine parity by completion, staged |
 | Speed | MTP0 ≥80/≥55 tok/s and MTP3 without n-gram ≥180/≥120 tok/s at 8K/256K; prefill ≥4,000/≥2,000 tok/s; one lane |
-| Quality | No worse than official AWQ on quick perplexity; task eval within noise |
+| Quality | No worse than the prior BF16-sourced artifact on quick perplexity; task eval within noise |
 | Reference | BF16 CPU capture on this WSL host after it reaches 32 GB, plus official AWQ on the 4080 |
 
 The 256K + q8 + vision budget is tight: rough arithmetic is 7.2 GiB of KV, 5.7 GiB of
@@ -135,8 +136,9 @@ Preview repository: `sensenova/SenseNova-Loop-9B-Preview`, revision
 uses default RoPE and 262,144 positions, so it is not the release semantics.
 
 Official AWQ: `sensenova/SenseNova-Loop-9B-AWQ`, revision
-`9250902822d85911d23781f0ddad9d7601f5033a`. It is public and includes a separate `mtp/`
-directory. Use it as an independent 4-bit behavioral/quality reference, not as the source.
+`8327226ffd2e33e34cb5466a0e6cccd4419bde40`. It is public and includes a separate `mtp/`
+directory. The canonical artifact is converted from this checkpoint; the BF16 release remains the
+numerical comparison reference.
 
 Do not use `/tmp` as a persistent source location. The reference capture must record the
 revision and hashes above. A local source snapshot can live under `/models/SenseNova-Loop-9B` if
@@ -606,7 +608,7 @@ context first, not vision precision. Quantizing vision is a later, separately me
 
 Converter requirements:
 
-- Read the main shards and `mtp.safetensors`; do not use the AWQ tensors as source.
+- Read the AWQ main shards and `mtp/` index; dequantize GEMM matrices and the row-major embedding.
 - Verify every source key/shape before writing.
 - Use `tools/artifact/numeric.py` and `tools/artifact/layouts.py`; keep FP16 scales exact.
 - Write a conversion report with source revision, hashes, object count, formats, and sizes.
@@ -618,9 +620,8 @@ MTP source:
 
 - Inspect `mtp.safetensors` keys and shapes before binding. The release main index has no `mtp.*`
   keys; the MTP is separate.
-- The AWQ MTP config has `mtp.main_norm.weight` and `mtp.norm.weight`; the existing Qwen binder
-  uses `mtp/final_norm`. Determine whether `main_norm` is an additional stem norm or the final
-  norm and bind it explicitly. Do not drop a norm.
+- The AWQ MTP config has `mtp.main_norm.weight` and `mtp.norm.weight`; `main_norm` is not consumed
+  by the draft path. The binder uses `mtp.norm.weight` as `mtp/final_norm`.
 - The release has `mtp_use_dedicated_embeddings=false`; reuse text embedding and the full
   `lm_head`. There is no optimized proposal head unless one is found in the source; do not
   invent one.

@@ -1,10 +1,11 @@
-"""Convert the release SenseNova-Loop-9B BF16 checkpoint into one .ninfer artifact.
+"""Convert the release SenseNova-Loop-9B BF16 checkpoint into a reference artifact.
 
-Canonical invocation::
+The canonical artifact is produced by ``awq.py`` from the official AWQ checkpoint.
+Reference invocation::
 
     python -m tools.convert.sensenova_loop_9b.convert \
       --model /models/SenseNova-Loop-9B \
-      --out out/sensenova_loop_9b.ninfer
+      --out out/sensenova_loop_9b_bf16_reference.ninfer
 """
 
 from __future__ import annotations

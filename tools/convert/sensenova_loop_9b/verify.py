@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
@@ -12,8 +11,8 @@ import torch
 
 from tools.artifact.container import Artifact, ResourceObject, TensorObject
 from tools.artifact.layouts import (
-    decode_direct,
     dequantize_row_split,
+    encode_direct,
     gather_row_planes,
     row_split_geometry,
 )
@@ -30,10 +29,6 @@ class VerificationError(ValueError):
 
 def _fail(message: str) -> None:
     raise VerificationError(message)
-
-
-def _index(objects):
-    return {obj.name: obj for obj in objects}
 
 
 def verify_structure(artifact: Artifact) -> None:
@@ -62,27 +57,30 @@ def verify_structure(artifact: Artifact) -> None:
                 _fail(f"{spec.name}: storage signature mismatch")
 
 
-def _source_reader_for(name: str, main: ShardReader, mtp: ShardReader) -> ShardReader:
+def _source_reader_for(name: str, main, mtp):
     return mtp if name in inventory.MTP_OBJECT_NAMES else main
 
 
-def _source_tensor(name: str, main: ShardReader, mtp: ShardReader) -> torch.Tensor:
+def _source_tensor(name: str, main, mtp) -> torch.Tensor:
     reader = _source_reader_for(name, main, mtp)
     return recipe.materialize_recipe(recipe.RECIPES_BY_NAME[name], reader)
 
 
-def verify_direct_objects(artifact: Artifact, main: ShardReader, mtp: ShardReader) -> int:
+_DIRECT_DTYPES = {
+    "BF16": torch.bfloat16,
+    "FP32": torch.float32,
+    "I32": torch.int32,
+}
+
+
+def verify_direct_objects(artifact: Artifact, main, mtp) -> int:
     count = 0
     for spec in inventory.TENSOR_SPECS:
         if spec.format not in DIRECT_FORMATS:
             continue
-        stored = decode_direct(artifact.payload(spec.name), spec.format, spec.shape)
         source = _source_tensor(spec.name, main, mtp)
-        if source.dtype == torch.float32:
-            source = source.to(torch.float32)
-        if stored.dtype == torch.float32:
-            source = source.to(torch.float32)
-        if not torch.equal(stored, source):
+        expected = encode_direct(source.to(_DIRECT_DTYPES[spec.format]), spec.format)
+        if expected != bytes(artifact.payload(spec.name)):
             _fail(f"{spec.name}: direct payload differs from the source")
         count += 1
     return count
@@ -104,7 +102,7 @@ def _probe_rows(rows: int) -> list[int]:
     return sorted({0, rows // 2, rows - 1})
 
 
-def verify_quantized_objects(artifact: Artifact, main: ShardReader, mtp: ShardReader) -> int:
+def verify_quantized_objects(artifact: Artifact, main, mtp) -> int:
     checked = 0
     for name in QUANT_PROBES:
         obj = artifact.find(name)
@@ -137,16 +135,31 @@ def verify_quantized_objects(artifact: Artifact, main: ShardReader, mtp: ShardRe
     return checked
 
 
-def verify_artifact(path: str | Path, model_dir: str | Path) -> dict[str, object]:
+def _open_sources(model: Path, source: str):
+    if source == "awq":
+        from .awq import AwqReader, open_mtp_reader
+
+        return AwqReader(model), open_mtp_reader(model)
+    if source == "bf16":
+        return ShardReader(model), ShardReader.from_file(model / "mtp.safetensors")
+    raise ValueError(f"unknown source format {source!r}")
+
+
+def verify_artifact(
+    path: str | Path,
+    model_dir: str | Path,
+    *,
+    source: str = "awq",
+) -> dict[str, object]:
     model = Path(model_dir)
-    with Artifact.open(path) as artifact, ShardReader(model) as main, ShardReader.from_file(
-        model / "mtp.safetensors"
-    ) as mtp:
+    main, mtp = _open_sources(model, source)
+    with Artifact.open(path) as artifact, main, mtp:
         verify_structure(artifact)
         direct = verify_direct_objects(artifact, main, mtp)
         quantized = verify_quantized_objects(artifact, main, mtp)
     return {
         "path": str(path),
+        "source": source,
         "objects": len(inventory.OBJECT_SPECS),
         "direct_objects": direct,
         "quantized_probes": quantized,
@@ -157,10 +170,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("artifact", type=Path)
     parser.add_argument("--model", required=True, type=Path)
+    parser.add_argument("--source", choices=("awq", "bf16"), default="awq")
     args = parser.parse_args(argv)
-    summary = verify_artifact(args.artifact, args.model)
+    summary = verify_artifact(args.artifact, args.model, source=args.source)
     print(
-        f"verified {summary['objects']} objects "
+        f"verified {summary['objects']} objects from {summary['source']} source "
         f"({summary['direct_objects']} direct, {summary['quantized_probes']} quantized probes)"
     )
 

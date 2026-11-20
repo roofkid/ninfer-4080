@@ -5,16 +5,18 @@ NInfer target for `sensenova/SenseNova-Loop-9B` on a single RTX 4080 (`sm_89`, 1
 | Field | Value |
 |---|---|
 | NInfer identity | `sensenova-loop-9b` / `groupwise-int` / `sensenova_loop_9b` |
-| Source revision | `3e1ba6e8ac98090f9f7c03a55f26269eb3850fb6` |
+| Source revision | `8327226ffd2e33e34cb5466a0e6cccd4419bde40` (official AWQ) |
 | Artifact | `sensenova_loop_9b.ninfer` |
 | Artifact bytes | 6,248,091,904 |
-| Artifact SHA-256 | `c58e34b8b6cfec63914eeca797c611bf6f37374869a2f73166231cf8f17fb144` |
+| Artifact SHA-256 | `e793869f6b4edb98ae1a8f08899a28f938ed77652796f5eaf572785cc48267e0` |
 | Text | 32 physical layers / 56 execution slots, 4096 hidden, 16/4/256 attention, 32-head GDN |
 | Context | 262144 validated with int8 KV (524288 native limit) |
 | Modalities | Text and image; video not supported |
 | Speculation | MTP3 + n-gram chain; no optimized proposal head, no DFlash2 |
 
-This is a 4-bit groupwise-int artifact converted from the official BF16 release. Text weights use
+This is a 4-bit groupwise-int artifact converted from the official AWQ 4-bit release. The AWQ
+GEMM matrices and row-major quantized embedding are dequantized, the AWQ-adjusted RMSNorm weights
+are retained, and the result is re-encoded in NInfer's registered formats. Text weights use
 Q4/Q5/Q6, mHC routers and GDN control scalars are FP32, norms/convolution are BF16, MTP matrices
 are W8, and the Vision tower uses the proven Qwen Q4/Q5/Q6/W8 roles with a 4096-wide merger.
 
@@ -28,12 +30,13 @@ Validation on the RTX 4080:
 - The 256K + Vision + MTP3 launch profile starts with about 0.35 GiB available after startup.
 - 253K-token prefill measured 1.72k tok/s; 3.5K-token prefill 2.62k tok/s.
 - 3.5K decode measured ~36 tok/s MTP0 and ~58 tok/s MTP3+n-gram.
-- 49-token perplexity 5.32 versus 5.09 for BF16 CPU.
+- Quick corpus perplexity 8.55 (int8 KV) versus 9.15 for the prior BF16-sourced artifact.
+- The maintainer MBPP comparison found no regression against the prior artifact.
 
 The performance targets in the implementation plan (80/55 MTP0, 180/120 MTP3, 4k/2k prefill) are
 not met by this artifact; it is published as a functional target with measured results, not as a
 performance claim. BF16 end-to-end inference is not possible on the 16 GiB card; correctness is
-qualified by CPU BF16 references, op oracles, and the AWQ cross-check.
+qualified by CPU BF16 references, op oracles, and the AWQ checkpoint comparison.
 
 ## Run
 

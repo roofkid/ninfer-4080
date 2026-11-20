@@ -12,24 +12,31 @@ framing is defined in [`artifact-container.md`](artifact-container.md), numeric 
 model_id     sensenova-loop-9b
 weights_id   groupwise-int
 target_key   sensenova_loop_9b
-source       sensenova/SenseNova-Loop-9B
-revision     3e1ba6e8ac98090f9f7c03a55f26269eb3850fb6
+source       sensenova/SenseNova-Loop-9B-AWQ
+revision     8327226ffd2e33e34cb5466a0e6cccd4419bde40
 ```
 
 Pinned source hashes:
 
 | Resource | SHA-256 |
 |---|---|
-| `config.json` | `614dbd44b3a7fba8cd3adf5118b91ee40d51765b874de9dfadf67ea4e16ba68e` |
-| `modeling_sensenova_loop.py` | `26e11d3522aa730c0ba031340ce42632bc2834da8cc0b6804006bb207d979a5b` |
+| `config.json` | `f62caa6744b50c25d13348a572403c2f597526f46a27da407ac0705a01ffcebb` |
+| `model.safetensors.index.json` | `36a2da515feace45ffefaa158c1dab741cd73128707f20cfb43fd0fd94fd7a2b` |
+| `mtp/model.safetensors.index.json` | `6b10fe824edbf051205aeb1b4ed62a118386c30f4ec83b4eb5d463e82c21bc23` |
+| `mtp/model-00001-of-00001.safetensors` | `bca1271c68a0584c31449dc66b8c3826e9428c3b31ded6358b745ed172abff4d` |
 | `chat_template.jinja` | `a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715` |
-| `model.safetensors.index.json` | `a478440d3817d761ef6a8088f063131e02197b0d8699262165d4626c5d577510` |
-| `preprocessor_config.json` | `3a159dfec9978a186a72ba085e0ad6a050f3968d8b364218d7bd13f5c89381f2` |
-| `generation_config.json` | `f288bb4281580138395c6acc7b3adb62f45c21530bc0708cb2cf9edf093f6a4f` |
+| `tokenizer.json` | `06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523` |
+| `tokenizer_config.json` | `792fa3f0cb88b111e54ef3134c873531008c4df471d108da17903426e308aa7b` |
+| `preprocessor_config.json` | `27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516` |
+| `generation_config.json` | `94d008428d534f4a633708eae6a3e72b1eae5326b6096d896daa53d1648e07ee` |
+| `video_preprocessor_config.json` (BF16 release) | `bd96830cce1312679aa1f2ea43ed17da20e8ebbcea2398cfa64e2d275a96fdd7` |
 
-The main index is sharded into 11 `model-*.safetensors` files; MTP is the separate
-`mtp.safetensors` (486,582,880 bytes) and is not in the main index. The release has no
-`text/draft_head` or optimized proposal head.
+The AWQ main index has three `model-*.safetensors` shards. MTP is
+`mtp/model-00001-of-00001.safetensors` (486,599,352 bytes) with its own index. The AWQ release
+omits `video_preprocessor_config.json`; the converter takes that one frontend resource from
+`sensenova/SenseNova-Loop-9B` revision `3e1ba6e8ac98090f9f7c03a55f26269eb3850fb6` because this
+target does not support video. AWQ's extra `mtp.main_norm.weight` is not consumed;
+`mtp.norm.weight` is the draft final norm.
 
 ## 2. Artifact size and object counts
 
@@ -45,8 +52,8 @@ The converted artifact contains **834 objects**: 6 raw frontend resources and 82
 Formats: `BF16` 406, `FP32` 144, `Q4G64_F16S` 118, `Q5G64_F16S` 150,
 `Q6G64_F16S` 3, `W8G32_F16S` 7. There are no `I32`, NVFP4, FP8, or Q3 objects.
 
-The converted release artifact used for qualification is 6,248,091,904 bytes with SHA-256
-`c58e34b8b6cfec63914eeca797c611bf6f37374869a2f73166231cf8f17fb144`. The size and hash describe the
+The current artifact is 6,248,091,904 bytes with SHA-256
+`e793869f6b4edb98ae1a8f08899a28f938ed77652796f5eaf572785cc48267e0`. The size and hash describe the
 generated file; identity is serialized and never inferred from filename, hash, or object count.
 
 ## 3. Text objects
@@ -106,9 +113,9 @@ mtp/final_norm                               BF16       [4096]
 ```
 
 Source mapping: `mtp.fc.weight`, `mtp.pre_fc_norm_embedding.weight`,
-`mtp.pre_fc_norm_hidden.weight`, `mtp.layers.0.*`, and `mtp.norm.weight`. The release has no
-`main_norm`; `mtp.norm.weight` is the draft final norm. MTP reuses the text embedding and full
-`lm_head`.
+`mtp.pre_fc_norm_hidden.weight`, `mtp.layers.0.*`, and `mtp.norm.weight`. The AWQ MTP carries an
+extra `main_norm` tensor; it is not consumed. `mtp.norm.weight` is the draft final norm. MTP
+reuses the text embedding and full `lm_head`.
 
 ## 5. Vision objects
 
@@ -156,19 +163,30 @@ added tokens come from `tokenizer.json`.
 
 ## 7. Converter
 
+The canonical artifact is converted from the official AWQ checkpoint. `awq.py` dequantizes the
+AWQ GEMM matrices and row-major 4-bit token embedding, keeps the AWQ-adjusted RMSNorm weights,
+casts direct tensors to the registered payload dtypes, and re-encodes the same object inventory
+and numeric assignment. `inventory.py` defines the complete object order and formats; `recipe.py`
+maps every object to its logical source.
+
 ```bash
 cd /work
-/opt/venv/bin/python -m tools.convert.sensenova_loop_9b.convert \
-  --model /models/SenseNova-Loop-9B \
-  --out out/sensenova_loop_9b.ninfer
+/opt/venv/bin/python -m tools.convert.sensenova_loop_9b.awq \
+  --model /models/SenseNova-Loop-9B-AWQ \
+  --out out/sensenova_loop_9b.ninfer \
+  --resource-fallback /models/SenseNova-Loop-9B \
+  --source-revision 8327226ffd2e33e34cb5466a0e6cccd4419bde40
 /opt/venv/bin/python -m tools.convert.sensenova_loop_9b.verify \
-  out/sensenova_loop_9b.ninfer --model /models/SenseNova-Loop-9B
+  out/sensenova_loop_9b.ninfer --model /models/SenseNova-Loop-9B-AWQ --source awq
 ```
 
-`inventory.py` defines the complete object order and formats; `recipe.py` maps every object to
-main-shard or `mtp.safetensors` sources; `convert.py` validates the release config and writes the
-artifact plus `.conversion.json`; `verify.py` checks structural identity, exact direct payloads,
-and representative quantized rows against the source.
+The AWQ release omits `video_preprocessor_config.json`; the converter takes that one frontend
+resource from the BF16 release because this target does not support video. `convert.py` remains
+the BF16-release reader for reference conversion; `awq.py` produces the canonical artifact.
+
+On the RTX 4080 with `int8` KV and the fixed quick corpus (4,096-token context, 2,048 stride), the
+AWQ-sourced artifact scored PPL 8.554851 versus 9.151547 for the prior BF16-sourced artifact. The
+maintainer MBPP comparison found no regression against the prior artifact.
 
 ## 8. Load and runtime checks
 
